@@ -3,8 +3,6 @@
 module ArrayBench
 using ..Driver
 
-const N = 2^16
-
 # Seven-point stencil over CartesianIndices, with bounds checks left in for the
 # compiler to prove away
 function stencil!(out, u)
@@ -55,7 +53,7 @@ bench("view_strided_sum"; ops = 1024 * 512, setup = () -> reshape(rand_f64(Split
 end
 
 # ReinterpretArray, historically a performance trap
-bench("reinterpret_sum"; ops = 4N, setup = () -> rand_f32(SplitMix(4), 4N)) do x
+bench("reinterpret_sum"; ops = 2^18, setup = () -> rand_f32(SplitMix(4), 2^18)) do x
     s = UInt32(0)
     for v in reinterpret(UInt32, x)
         s += v >> 3
@@ -79,46 +77,47 @@ end
 
 # Growth through push!, i.e. Memory reallocation and the growend path. Reallocation
 # goes through the system allocator and page faults, hence the wider tolerance.
-bench("push_grow"; ops = 4N, tolerance = 0.1) do _
+bench("push_grow"; ops = 2^18, tolerance = 0.1) do _
     v = Int[]
-    for i in 1:4N
+    for i in 1:2^18
         push!(v, i)
     end
     w = Float64[]
-    for i in 1:N
+    for i in 1:2^16
         pushfirst!(w, i)
         length(w) > 64 && pop!(w)
     end
     v, w
 end
 
-const SORT_F64 = rand_f64(SplitMix(6), 4N)
-bench("sort_f64"; ops = 4N, setup = () -> copy(SORT_F64), reset = v -> copyto!(v, SORT_F64)) do v
+# The input is restored before every sample: (data, pristine copy)
+bench("sort_f64"; ops = 2^18, setup = () -> (x = rand_f64(SplitMix(6), 2^18); (copy(x), x)),
+      reset = ((v, x),) -> copyto!(v, x)) do (v, _)
     sort!(v)
 end
 
 # Integers with a small range take the counting/radix paths
-const SORT_INT = rand_int(SplitMix(7), 4N, -10^6, 10^6)
-bench("sort_int"; ops = 4N, setup = () -> copy(SORT_INT), reset = v -> copyto!(v, SORT_INT)) do v
+bench("sort_int"; ops = 2^18, setup = () -> (x = rand_int(SplitMix(7), 2^18, -10^6, 10^6); (copy(x), x)),
+      reset = ((v, x),) -> copyto!(v, x)) do (v, _)
     sort!(v)
 end
 
 # A by= transform over tuples: comparator inlining through the sort machinery
 function sortby_input()
     r = SplitMix(8)
-    return collect(zip(rand_int(r, N, 1, 1000), rand_f64(r, N)))
+    return collect(zip(rand_int(r, 2^16, 1, 1000), rand_f64(r, 2^16)))
 end
-const SORT_BY = sortby_input()
-bench("sort_by_tuple"; ops = N, setup = () -> copy(SORT_BY), reset = v -> copyto!(v, SORT_BY)) do v
+bench("sort_by_tuple"; ops = 2^16, setup = () -> (x = sortby_input(); (copy(x), x)),
+      reset = ((v, x),) -> copyto!(v, x)) do (v, _)
     sort!(v; by = last, rev = true)
 end
 
 # Random queries keep the binary search's branches unpredictable
 function search_input()
     r = SplitMix(9)
-    return sort!(rand_f64(r, 2^20)), rand_f64(r, N ÷ 4)
+    return sort!(rand_f64(r, 2^20)), rand_f64(r, 2^14)
 end
-bench("searchsorted"; ops = N ÷ 4, setup = search_input) do (hay, q)
+bench("searchsorted"; ops = 2^14, setup = search_input) do (hay, q)
     s = 0
     for x in q
         s += searchsortedfirst(hay, x)

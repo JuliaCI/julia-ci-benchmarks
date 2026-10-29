@@ -3,10 +3,12 @@
 module RuntimeBench
 using ..Driver
 
+# Shared by the benchmarks below: paste this part first to run one of them in the REPL.
 struct ParseFailure <: Exception
     i::Int
 end
 @noinline check(x, i) = x > 0.9 ? throw(ParseFailure(i)) : x
+# End of the shared part.
 
 # Every tenth element throws: jl_throw, unwinding and the backtrace collection
 bench("throw_catch"; ops = 2^11, setup = () -> rand_f64(SplitMix(1), 2^11)) do xs

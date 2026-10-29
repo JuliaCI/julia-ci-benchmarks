@@ -3,6 +3,14 @@
 module StringsBench
 using ..Driver
 
+# Shared by the benchmarks below: paste this part first to run one of them in the REPL.
+function log_input()
+    r = SplitMix(6)
+    levels = ("INFO", "WARN", "ERROR", "DEBUG")
+    return ["2026-10-$(lpad(1 + i % 28, 2, '0'))T12:$(lpad(i % 60, 2, '0')):00 $(levels[1 + i % 4]) [worker-$(i % 13)] took $(rand_int(r, 1, 1, 9999)[1]) ms" for i in 1:4096]
+end
+# End of the shared part.
+
 function csv_input()
     r = SplitMix(1)
     rows = String[]
@@ -64,11 +72,6 @@ bench("print_numbers"; ops = 16384, setup = print_input) do (fs, is)
     n
 end
 
-function log_input()
-    r = SplitMix(6)
-    levels = ("INFO", "WARN", "ERROR", "DEBUG")
-    return ["2026-10-$(lpad(1 + i % 28, 2, '0'))T12:$(lpad(i % 60, 2, '0')):00 $(levels[1 + i % 4]) [worker-$(i % 13)] took $(rand_int(r, 1, 1, 9999)[1]) ms" for i in 1:4096]
-end
 # PCRE with JIT, captures turned into SubStrings
 bench("regex_captures"; ops = 4096, setup = log_input) do lines
     re = r"^(\d{4})-(\d\d)-(\d\d)T[\d:]+ (ERROR|WARN) \[worker-(\d+)\] took (\d+) ms$"

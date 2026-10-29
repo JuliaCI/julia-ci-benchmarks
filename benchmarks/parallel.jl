@@ -1,15 +1,11 @@
-# The scheduler, synchronization and multi-threaded GC. bench.jl runs this category with
-# several threads (4 by default). Work spans threads, so all of these are judged on time,
-# with tolerances that reflect the extra noise of cross-core communication.
+# The scheduler, synchronization and multi-threaded GC, on 4 threads: bench.jl starts this
+# category with -t 4 (start the REPL with -t 4 to run a block locally). Work spans threads,
+# so all of these are judged on time, with tolerances for the noise of cross-core traffic.
 module ParallelBench
 using ..Driver
-using Base.Threads
-
-const NT = 4
-opts = (; min_threads = NT, metric = "time", tolerance = 0.15)
 
 # Many trivial tasks: creation, enqueue, wakeup, fetch
-bench("spawn_fetch"; ops = 4096, opts...) do _
+bench("spawn_fetch"; ops = 4096, min_threads = 4, metric = "time", tolerance = 0.15) do _
     ts = [Threads.@spawn(i + 1) for i in 1:4096]
     s = 0
     for t in ts
@@ -25,17 +21,17 @@ function pfib(n)
     t = Threads.@spawn pfib(n - 1)
     return pfib(n - 2) + fetch(t)::Int
 end
-bench("spawn_tree"; ops = 1, opts...) do _
+bench("spawn_tree"; ops = 1, min_threads = 4, metric = "time", tolerance = 0.15) do _
     pfib(28)
 end
 
 # Fork-join loop overhead and memory bandwidth, static schedule
-bench("threads_static_sum"; ops = 2^22, setup = () -> (rand_f64(SplitMix(1), 2^22), zeros(NT * 8)), opts..., tolerance = 0.2) do (x, part)
+bench("threads_static_sum"; ops = 2^22, setup = () -> (rand_f64(SplitMix(1), 2^22), zeros(4 * 8)), min_threads = 4, metric = "time", tolerance = 0.2) do (x, part)
     fill!(part, 0.0)
     n = length(x)
-    @threads :static for t in 1:NT
-        lo = 1 + (t - 1) * n ÷ NT
-        hi = t * n ÷ NT
+    Threads.@threads :static for t in 1:4
+        lo = 1 + (t - 1) * n ÷ 4
+        hi = t * n ÷ 4
         s = 0.0
         @inbounds @simd for i in lo:hi
             s += x[i]
@@ -47,15 +43,15 @@ end
 
 # Imbalanced iterations under the dynamic schedule
 work(i) = (s = 0.0; for k in 1:(50 * (1 + i % 17)); s += sqrt(k + i); end; s)
-bench("threads_dynamic_imbalanced"; ops = 4096, setup = () -> zeros(4096), opts...) do out
-    @threads :dynamic for i in 1:4096
+bench("threads_dynamic_imbalanced"; ops = 4096, setup = () -> zeros(4096), min_threads = 4, metric = "time", tolerance = 0.15) do out
+    Threads.@threads :dynamic for i in 1:4096
         @inbounds out[i] = work(i)
     end
     out
 end
 
 # Unbuffered channel: every put! waits for a take! on another thread
-bench("channel_pingpong"; ops = 512, opts...) do _
+bench("channel_pingpong"; ops = 512, min_threads = 4, metric = "time", tolerance = 0.15) do _
     a = Channel{Int}(0)
     b = Channel{Int}(0)
     t = Threads.@spawn for _ in 1:512
@@ -71,7 +67,7 @@ bench("channel_pingpong"; ops = 512, opts...) do _
 end
 
 # Buffered producer/consumer throughput, two producers and two consumers
-bench("channel_buffered"; ops = 2^16, opts...) do _
+bench("channel_buffered"; ops = 2^16, min_threads = 4, metric = "time", tolerance = 0.15) do _
     ch = Channel{Int}(256)
     total = Threads.Atomic{Int}(0)
     producers = [Threads.@spawn(for i in 1:2^15; put!(ch, i); end) for _ in 1:2]
@@ -83,8 +79,8 @@ bench("channel_buffered"; ops = 2^16, opts...) do _
 end
 
 # A contended ReentrantLock
-bench("lock_contention"; ops = NT * 2^13, setup = () -> (ReentrantLock(), Ref(0)), opts...) do (lk, cnt)
-    @sync for _ in 1:NT
+bench("lock_contention"; ops = 4 * 2^13, setup = () -> (ReentrantLock(), Ref(0)), min_threads = 4, metric = "time", tolerance = 0.15) do (lk, cnt)
+    @sync for _ in 1:4
         Threads.@spawn for _ in 1:2^13
             lock(lk) do
                 cnt[] += 1
@@ -95,9 +91,9 @@ bench("lock_contention"; ops = NT * 2^13, setup = () -> (ReentrantLock(), Ref(0)
 end
 
 # Contended atomic read-modify-write: LSE atomics vs. LL/SC loops are a codegen choice
-bench("atomic_contention"; ops = NT * 2^16, opts...) do _
+bench("atomic_contention"; ops = 4 * 2^16, min_threads = 4, metric = "time", tolerance = 0.15) do _
     a = Threads.Atomic{Int}(0)
-    @threads :static for _ in 1:NT
+    Threads.@threads :static for _ in 1:4
         for _ in 1:2^16
             Threads.atomic_add!(a, 1)
         end
@@ -106,7 +102,7 @@ bench("atomic_contention"; ops = NT * 2^16, opts...) do _
 end
 
 # Task switches on one thread: two @async tasks handing control back and forth
-bench("task_switch"; ops = 1024, opts...) do _
+bench("task_switch"; ops = 1024, min_threads = 4, metric = "time", tolerance = 0.15) do _
     c1 = Condition()
     c2 = Condition()
     n = Ref(0)
@@ -130,8 +126,8 @@ struct Pt
     y::Float64
     tag::Any
 end
-bench("alloc_threads"; ops = NT * 2^16, setup = () -> [Vector{Any}(undef, 512) for _ in 1:NT], opts...) do keeps
-    @threads :static for t in 1:NT
+bench("alloc_threads"; ops = 4 * 2^16, setup = () -> [Vector{Any}(undef, 512) for _ in 1:4], min_threads = 4, metric = "time", tolerance = 0.15) do keeps
+    Threads.@threads :static for t in 1:4
         keep = keeps[t]
         for i in 1:2^16
             @inbounds keep[1 + i % 512] = Pt(i, t, i)
@@ -154,7 +150,7 @@ function big_heap()
     GC.gc(true)
     return Ref{Any}(head)
 end
-bench("full_gc_parallel_mark"; setup = big_heap, seconds = 1.0, opts...) do h
+bench("full_gc_parallel_mark"; setup = big_heap, seconds = 1.0, min_threads = 4, metric = "time", tolerance = 0.15) do h
     GC.gc(true)
     h
 end

@@ -4,6 +4,7 @@
 module TypesBench
 using ..Driver
 
+# Shared by the benchmarks below: paste this part first to run one of them in the REPL.
 const TYPES = Any[
     Int, Float64, Real, Number, Any, String, AbstractString, Union{Int,Nothing},
     Vector{Int}, Vector{<:Real}, AbstractVector{Float64}, Array{T,2} where T,
@@ -20,6 +21,8 @@ function pairs_input(seed)
     n = length(TYPES)
     return [(TYPES[i], TYPES[j]) for (i, j) in zip(rand_int(r, 4096, 1, n), rand_int(r, 4096, 1, n))]
 end
+
+# End of the shared part.
 
 bench("subtype"; ops = 4096, setup = () -> pairs_input(1)) do ps
     n = 0

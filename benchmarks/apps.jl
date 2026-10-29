@@ -32,8 +32,8 @@ function nbody_input()
     r = SplitMix(1)
     return [Body(Tuple(rand_f64(r, 3, -1, 1)), Tuple(rand_f64(r, 3, -0.1, 0.1)), rand_f64(r, 1, 0.5, 2)[1]) for _ in 1:32]
 end
-const NBODY0 = nbody_input()
-bench("nbody"; ops = 100 * 32^2, setup = () -> copy(NBODY0), reset = bs -> copyto!(bs, NBODY0)) do bs
+bench("nbody"; ops = 100 * 32^2, setup = () -> (x = nbody_input(); (copy(x), x)),
+      reset = ((bs, x),) -> copyto!(bs, x)) do (bs, _)
     for _ in 1:100
         nbody_step!(bs, 0.001)
     end
@@ -323,8 +323,8 @@ function lu_nopivot!(A)
     end
     return A
 end
-const LU0 = reshape(rand_f64(SplitMix(3), 160^2, -1, 1), 160, 160)
-bench("lu_checked"; ops = 160^3 ÷ 3, setup = () -> copy(LU0), reset = A -> copyto!(A, LU0)) do A
+lu_input() = (x = reshape(rand_f64(SplitMix(3), 160^2, -1, 1), 160, 160); (copy(x), x))
+bench("lu_checked"; ops = 160^3 ÷ 3, setup = lu_input, reset = ((A, x),) -> copyto!(A, x)) do (A, _)
     lu_nopivot!(A)[end, end]
 end
 

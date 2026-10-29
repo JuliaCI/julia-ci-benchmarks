@@ -24,6 +24,10 @@ end
 const SUITE = Bench[]
 const CATEGORY = Ref("")
 const DEFAULT_SECONDS = 0.5
+# Scales the sampling budget of benchmarks run interactively (tools/check_blocks.jl lowers it)
+const INTERACTIVE_SCALE = Ref(1.0)
+# Input files of the benchmarks, found the same way from a suite load and from the REPL
+const DATA_DIR = joinpath(dirname(@__DIR__), "data")
 const MIN_SAMPLES = 5
 const MAX_SAMPLES = 300
 
@@ -41,13 +45,33 @@ marking). `tolerance` overrides the comparison threshold for that metric.
 function bench(kernel, name::String; setup = () -> nothing, reset = nothing, ops::Int = 1,
                seconds::Real = DEFAULT_SECONDS, min_threads::Int = 1, metric::String = "cycles",
                tolerance::Real = 0.0)
-    full = string(CATEGORY[], "/", name)
-    any(b -> b.name == full, SUITE) && error("duplicate benchmark $full")
     metric in ("cycles", "time") || error("unknown metric $metric")
-    push!(SUITE, Bench(full, kernel, setup, reset, ops, Float64(seconds), min_threads, metric,
-                       Float64(tolerance)))
+    interactive = isempty(CATEGORY[])
+    full = interactive ? name : string(CATEGORY[], "/", name)
+    b = Bench(full, kernel, setup, reset, ops, Float64(seconds), min_threads, metric, Float64(tolerance))
+    # Outside a suite load (a block pasted into the REPL), run it right away
+    interactive && return Base.invokelatest(run_interactive, b)
+    any(x -> x.name == full, SUITE) && error("duplicate benchmark $full")
+    push!(SUITE, b)
     return nothing
 end
+
+function run_interactive(b::Bench)
+    backend = counter_backend()
+    rec = run_one(b, backend, INTERACTIVE_SCALE[])
+    rec.status == "ok" || (println(b.name, ": ", rec.status, " (", rec.error, ")"); return rec)
+    parts = ["min $(format_ns(rec.min_ns)) (median $(format_ns(rec.median_ns)))"]
+    b.ops > 1 && push!(parts, "$(format_ns(rec.min_ns / b.ops))/op")
+    for (k, v) in sort!(collect(rec.counters); by = first)
+        push!(parts, "$(format_count(minimum(v))) $k")
+    end
+    push!(parts, "$(rec.allocs) allocs", "$(length(rec.times_ns)) samples")
+    println(b.name, ": ", join(parts, " · "))
+    return rec
+end
+
+format_count(c) = c < 1e4 ? string(c) : c < 1e7 ? string(round(c / 1e3; digits = 1), "k") :
+                  c < 1e10 ? string(round(c / 1e6; digits = 2), "M") : string(round(c / 1e9; digits = 2), "G")
 
 function load_category(dir::String, category::String)
     CATEGORY[] = category

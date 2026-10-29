@@ -5,7 +5,8 @@
 module CompilerBench
 using ..Driver
 
-const SRC = read(joinpath(@__DIR__, "..", "data", "compiler_workload.jl"), String)
+# Shared by the benchmarks below: paste this part first to run one of them in the REPL.
+const SRC = read(joinpath(Driver.DATA_DIR, "compiler_workload.jl"), String)
 
 fresh_module() = Module(:CompilerWorkload, true)
 
@@ -15,6 +16,35 @@ function load(src)
     return m
 end
 latest(m, name) = Base.invokelatest(getfield, m, name)
+# One long function of straight-line arithmetic and branches (lower_large_function,
+# llvm_large_function): little to infer, a lot for lowering and LLVM
+function large_function_src()
+    io = IOBuffer()
+    println(io, "function big(x::Float64, y::Float64, n::Int)")
+    r = SplitMix(1)
+    for i in 1:300
+        a, b = rand_int(r, 2, 0, i - 1)
+        va = a == 0 ? "x" : "v$a"
+        vb = b == 0 ? "y" : "v$b"
+        k = i % 5
+        if k == 0
+            println(io, "    v$i = $va * $vb + $(i).5")
+        elseif k == 1
+            println(io, "    v$i = n > $i ? $va - $vb : $vb / ($va + 1.5)")
+        elseif k == 2
+            println(io, "    v$i = muladd($va, $(i % 7 + 1).0, $vb)")
+        elseif k == 3
+            println(io, "    v$i = ifelse($va < $vb, sqrt(abs($va)), $vb * $vb)")
+        else
+            println(io, "    v$i = $va + (n % $(i % 11 + 2)) * $vb")
+        end
+    end
+    println(io, "    return v300 + v299")
+    println(io, "end")
+    return String(take!(io))
+end
+const BIG_SRC = large_function_src()
+# End of the shared part.
 
 bench("parse"; ops = sizeof(SRC), setup = () -> SRC) do src
     length(Meta.parseall(src).args)
@@ -153,34 +183,6 @@ bench("first_call"; setup = () -> Ref{Module}(), reset = mref -> (mref[] = load(
     length(Base.invokelatest(latest(mref[], :run_all)))
 end
 
-# One long function of straight-line arithmetic and branches: little to infer, a lot for
-# LLVM's pass pipeline and instruction selection
-function large_function_src()
-    io = IOBuffer()
-    println(io, "function big(x::Float64, y::Float64, n::Int)")
-    r = SplitMix(1)
-    for i in 1:300
-        a, b = rand_int(r, 2, 0, i - 1)
-        va = a == 0 ? "x" : "v$a"
-        vb = b == 0 ? "y" : "v$b"
-        k = i % 5
-        if k == 0
-            println(io, "    v$i = $va * $vb + $(i).5")
-        elseif k == 1
-            println(io, "    v$i = n > $i ? $va - $vb : $vb / ($va + 1.5)")
-        elseif k == 2
-            println(io, "    v$i = muladd($va, $(i % 7 + 1).0, $vb)")
-        elseif k == 3
-            println(io, "    v$i = ifelse($va < $vb, sqrt(abs($va)), $vb * $vb)")
-        else
-            println(io, "    v$i = $va + (n % $(i % 11 + 2)) * $vb")
-        end
-    end
-    println(io, "    return v300 + v299")
-    println(io, "end")
-    return String(take!(io))
-end
-const BIG_SRC = large_function_src()
 bench("lower_large_function"; setup = () -> (Meta.parse(BIG_SRC), Ref{Module}()), reset = st -> (st[2][] = fresh_module())) do (ex, mref)
     length(string(typeof(Meta.lower(mref[], ex))))
 end

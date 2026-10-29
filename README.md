@@ -148,11 +148,32 @@ machine, the settings, the suite commit, Buildkite variables and any failed proc
 `compare.jl` adds `report.md` and, for two arms, `compare.json` with the per-benchmark and
 per-category verdicts.
 
+## Running one benchmark locally
+
+Every benchmark is a self-contained block, its helpers and input function directly above
+its `bench` call, so it can be pasted into a REPL. Outside a suite run, `bench` runs the
+benchmark right away and prints a summary:
+
+```julia
+julia> include("driver/Driver.jl"); using .Driver
+
+julia> # paste any block from benchmarks/*.jl, e.g. simd/axpy_alias_check
+axpy_alias_check: min 56.54 µs (median 57.75 µs) · 0.2 ns/op · 226.2k cycles · 526.3k instructions · 0 allocs · 300 samples
+```
+
+It returns the full record (every sample's time and counters). A few files (`compiler`,
+`types`, `runtime`, `strings`) start with a part shared by several of their benchmarks,
+between `# Shared by the benchmarks below` and `# End of the shared part.`; paste that
+first. `parallel` needs a REPL started with `-t 4`. From the shell,
+`julia run.jl --category=simd --filter=axpy` runs the same benchmark as the suite does.
+
+`tools/check_blocks.jl` checks that every block runs on its own this way.
+
 ## Adding a benchmark
 
 ```julia
 # benchmarks/<category>.jl, inside the category's module
-bench("name"; ops = N, setup = () -> rand_f64(SplitMix(42), N)) do x
+bench("name"; ops = 2^16, setup = () -> rand_f64(SplitMix(42), 2^16)) do x
     # one call of this is one sample
     sum(abs2, x)
 end
@@ -161,3 +182,8 @@ end
 Keywords: `setup` (builds state once), `reset` (untimed, before each sample), `ops`
 (work items per call), `seconds` (sampling budget), `metric` (`"cycles"` or `"time"`),
 `tolerance` (overrides the comparison threshold), `min_threads`.
+
+Keep the block self-contained: literal sizes rather than file-level constants, helpers
+directly above the `bench` call, and input that `reset` restores kept in the state (not
+in a `const`, so pasting a block twice works). Run `julia -t 4 tools/check_blocks.jl`
+before committing.
