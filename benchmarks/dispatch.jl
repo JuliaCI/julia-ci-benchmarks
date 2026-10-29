@@ -46,6 +46,27 @@ function union_split_loop(xs)
 end
 bench(union_split_loop, union_split_loop_setup; ops = 2^17)
 
+# An isbits Union returned from a call that is not inlined: the union return ABI (payload
+# buffer plus type tag) and union splitting at the caller
+struct SmallResult
+    x::Float64
+end
+struct WideResult
+    x::Float64
+    y::Float64
+end
+union_return_abi_setup() = rand_f64(SplitMix(8), 2^16, -1, 1)
+@noinline choose_result(x) = x < 0 ? SmallResult(-x) : WideResult(x, x * x)
+function union_return_abi(xs)
+    s = 0.0
+    @inbounds for x in xs
+        r = choose_result(x)
+        s += r isa SmallResult ? r.x : r.x + r.y
+    end
+    return s
+end
+bench(union_return_abi, union_return_abi_setup; ops = 2^16)
+
 # Fully dynamic arithmetic with boxing: Vector{Any} and an untyped accumulator
 any_arith_setup() = Any[isodd(i) ? i : Float64(i) for i in rand_int(SplitMix(3), 2^15, 1, 1000)]
 function any_arith(xs)

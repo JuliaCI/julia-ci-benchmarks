@@ -57,6 +57,25 @@ function dict_any(ks, pool)
 end
 bench(dict_any, dict_any_setup; ops = 2^15)
 
+# Deletion and reinsertion at a fixed population: tombstones, probing past deleted slots
+# and the rehash that clears them. Reset rebuilds the Dict, so every sample starts alike.
+function dict_delete_churn_setup()
+    ks = shuffle_det!(SplitMix(6), collect(1:2^16))
+    return Ref(Dict(k => k for k in ks)), ks
+end
+function dict_delete_churn(box, ks)
+    d = box[]
+    n = length(ks)
+    s = 0
+    for k in ks
+        delete!(d, k)
+        d[k + n] = k
+        s += get(d, k, 0) + d[k + n]
+    end
+    return s
+end
+bench(dict_delete_churn, dict_delete_churn_setup; ops = 2^16, reset = (box, ks) -> (box[] = Dict(k => k for k in ks)))
+
 # IdDict lives in the C runtime (eqtable), keyed by object identity
 function iddict_setup()
     return [Ref(i) for i in 1:2^15]

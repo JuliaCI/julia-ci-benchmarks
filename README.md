@@ -3,7 +3,7 @@
 A runtime benchmark suite for Julia itself, small enough to run on every commit to
 `master` and on pull requests, on the same macOS aarch64 machine as the TTFX job. It
 complements [BaseBenchmarks.jl](https://github.com/JuliaCI/BaseBenchmarks.jl): instead of
-thousands of overlapping cases, it has ~110 benchmarks, each chosen to cover a code path
+thousands of overlapping cases, it has 113 benchmarks, each chosen to cover a code path
 the others do not. The suite targets what changes when *Julia* changes: codegen and
 aliasing information, LLVM upgrades, inference, lowering, the runtime, the GC and the
 scheduler. Library performance (LinearAlgebra, SparseArrays, ...) is out of scope.
@@ -87,13 +87,13 @@ per-sample reset with a fixed evaluation count, and a record format the comparis
 |---|---|---|
 | `scalar` | Julia's libm (exp, log, sincos, pow), vectorizable Float32 map, integer div/rem/fld/mod, Int128, Float16, checked arithmetic and conversions | cycles |
 | `simd` | reductions with and without `@simd`, Base's mapreduce, NaN-aware max/min, FMA dot, aliasing runtime checks, fused and 2-D broadcast, selects, narrow integers, gathers, tuple SLP, complex | cycles |
-| `array` | Cartesian stencil with bounds checks, loop matmul, strided views, reinterpret, permutedims, push!/Memory growth, sort (float, int radix, by=), searchsorted, BitArray, cat/splat | cycles |
-| `collections` | Dict with int, string and `Any` keys, IdDict, Set operations, iterator composition, tuples longer than 32 | cycles |
+| `array` | Cartesian stencil with bounds checks, loop matmul, strided views, reinterpret, permutedims, push!/Memory growth, sort (float, int radix, by=), searchsorted, BitArray, cat/splat, stores and copies of a `Union{Missing,Float64}` array | cycles |
+| `collections` | Dict with int, string and `Any` keys, deletion churn, IdDict, Set operations, iterator composition, tuples longer than 32 | cycles |
 | `strings` | split/join, interpolation, number parsing and printing, regex captures, Unicode iteration, replace/search, symbol interning | cycles |
 | `io` | IOBuffer print and readline, Serialization, a page-cache file round trip | cycles |
-| `dispatch` | abstract element types, union splitting, `Any` arithmetic, boxed closures, dynamic kwcalls, dynamic splats, invokelatest | cycles |
+| `dispatch` | abstract element types, union splitting, isbits union returns, `Any` arithmetic, boxed closures, dynamic kwcalls, dynamic splats, invokelatest | cycles |
 | `types` | subtyping, intersection, apply_type with the type cache, method lookup, type printing | cycles |
-| `runtime` | throw/catch, try without throw, egal and hash, deepcopy, global bindings, task-local storage, ScopedValues | cycles |
+| `runtime` | throw/catch, try without throw, egal and hash, deepcopy, global bindings, task-local storage, a `ccall` with a `Ref` out-parameter, atomic fields, ScopedValues | cycles |
 | `gc` | binary trees, full GC of a large heap, the write barrier's slow path over many old owners, big arrays, small arrays, finalizers, BigInt | time |
 | `compiler` | parsing, macro expansion, lowering (whole file, closures and keywords, a large function), inference of a workload and of Base for a new type, first call, LLVM on a large function, method invalidation | cycles |
 | `apps` | n-body, Mandelbrot, spectral norm, fannkuch, a JSON parser, a bytecode interpreter, LU with bounds checks, RK4 on tuples, BFS | cycles |

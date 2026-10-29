@@ -146,4 +146,25 @@ function cat_splat(vs)
 end
 bench(cat_splat, cat_splat_setup; ops = 1024)
 
+# Stores into a Union{Missing,Float64} array (payload and type tag written separately),
+# then a bulk copy of both. One array in three regions: the first is the input and is
+# never written, so no reset is needed.
+function union_store_copy_setup()
+    b = fill!(Vector{Union{Missing,Float64}}(undef, 3 * 2^18), missing)
+    for (i, x) in enumerate(rand_f64(SplitMix(12), 2^18, -1, 1))
+        b[i] = x < 0 ? missing : x
+    end
+    return b
+end
+function union_store_copy(b)
+    n = 2^18
+    @inbounds for i in 1:n
+        x = b[i]
+        b[n + i] = x === missing ? missing : muladd(2.0, x, 1.0)
+    end
+    copyto!(b, 2n + 1, b, n + 1, n)
+    return b
+end
+bench(union_store_copy, union_store_copy_setup; ops = 2^18)
+
 end

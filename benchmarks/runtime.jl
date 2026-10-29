@@ -106,6 +106,38 @@ function task_local_storage_rw()
 end
 bench(task_local_storage_rw; ops = 2^14)
 
+# A cheap C call with a Ref out-parameter: ccall argument conversion, and the Ref kept on
+# the stack rather than allocated
+ccall_ref_output_setup() = rand_f64(SplitMix(5), 2^16, -1e6, 1e6)
+function ccall_ref_output(xs)
+    s = 0.0
+    @inbounds for x in xs
+        ipart = Ref{Cdouble}(0.0)
+        fpart = ccall((:modf, Base.Math.libm), Cdouble, (Cdouble, Ref{Cdouble}), x, ipart)
+        s += fpart + 0.125 * ipart[]
+    end
+    return s
+end
+bench(ccall_ref_output, ccall_ref_output_setup; ops = 2^16)
+
+# Atomic fields, uncontended: atomic loads and compare-exchange that succeeds about half
+# the time, with explicit memory orderings
+mutable struct AtomicSlot
+    @atomic value::Int
+end
+atomic_field_cas_setup() = (AtomicSlot(0), rand_int(SplitMix(6), 2^16, -10^6, 10^6))
+function atomic_field_cas(slot, xs)
+    successes = 0
+    @inbounds for x in xs
+        old = @atomic :acquire slot.value
+        expected = isodd(x) ? old : xor(old, 1)
+        result = @atomicreplace :acquire_release :acquire slot.value expected => x
+        successes += result.success
+    end
+    return successes, (@atomic :acquire slot.value)
+end
+bench(atomic_field_cas, atomic_field_cas_setup; ops = 2^16, reset = (slot, xs) -> (@atomic :release slot.value = 0))
+
 # ScopedValues (1.11+): HAMT lookups and dynamic scopes
 if isdefined(Base, :ScopedValues)
     const SV = Base.ScopedValues.ScopedValue(0)
