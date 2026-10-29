@@ -31,19 +31,22 @@ function shuffle_det!(r::SplitMix, v::AbstractVector)
 end
 
 """
-    carve(T, n, k) -> (buffer, (v1, ..., vk))
+    carve(n, T1, T2, ...) -> (buffer, (v1::Vector{T1}, v2::Vector{T2}, ...))
+    carve(T, n, k)        -> (buffer, (v1, ..., vk))
 
-`k` vectors of `n` elements of `T`, cut from one allocation at fixed offsets. Kernels
-that stream several arrays are sensitive to where the arrays lie relative to each other
-(cache-set and 4K-aliasing conflicts), and separate allocations land differently in
-every process. Keep `buffer` alive with the vectors (put it in the benchmark state).
+Vectors of `n` elements cut from one allocation at fixed offsets. Kernels that stream
+several arrays are sensitive to where the arrays lie relative to each other (cache-set
+and 4K-aliasing conflicts, worst for power-of-two sizes), and separate allocations land
+differently in every process: up to 7x in cycles with identical instructions. Keep
+`buffer` alive with the vectors (put it in the benchmark state).
 """
-function carve(::Type{T}, n::Integer, k::Integer) where {T}
-    stride = (cld(n * sizeof(T), 4096) * 4096 + 192) ÷ sizeof(T)
-    buf = zeros(T, stride * k + 4096 ÷ sizeof(T))
-    base = pointer(buf)
-    # Start on a page boundary, whatever alignment the allocator returned
-    skip = (4096 - Int(UInt(base) % 4096)) % 4096 ÷ sizeof(T)
-    vs = ntuple(j -> unsafe_wrap(Array, pointer(buf, 1 + skip + (j - 1) * stride), n), k)
+function carve(n::Integer, Ts::Type...)
+    # Each vector starts on a page boundary plus a different multiple of 192 bytes
+    sizes = [cld(n * sizeof(T), 4096) * 4096 + 192 for T in Ts]
+    buf = zeros(UInt8, sum(sizes) + 4096)
+    skip = (4096 - Int(UInt(pointer(buf)) % 4096)) % 4096
+    offsets = cumsum([skip; sizes[1:end-1]])
+    vs = ntuple(j -> fill!(unsafe_wrap(Array, Ptr{Ts[j]}(pointer(buf, 1 + offsets[j])), n), zero(Ts[j])), length(Ts))
     return buf, vs
 end
+carve(::Type{T}, n::Integer, k::Integer) where {T} = carve(n, ntuple(_ -> T, k)...)

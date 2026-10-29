@@ -16,7 +16,12 @@ function stencil!(out, u)
     end
     return out
 end
-bench("stencil_3d_cartesian"; ops = 62^3, setup = () -> (zeros(64, 64, 64), reshape(rand_f64(SplitMix(1), 64^3), 64, 64, 64))) do (out, u)
+function stencil_input()
+    buf, (out, u) = carve(Float64, 64^3, 2)
+    u .= rand_f64(SplitMix(1), 64^3)
+    return buf, reshape(out, 64, 64, 64), reshape(u, 64, 64, 64)
+end
+bench("stencil_3d_cartesian"; ops = 62^3, setup = stencil_input) do (_, out, u)
     stencil!(out, u)
 end
 
@@ -35,9 +40,12 @@ function matmul!(C, A, B)
 end
 function matmul_input()
     r = SplitMix(2)
-    return zeros(96, 96), reshape(rand_f64(r, 96^2), 96, 96), reshape(rand_f64(r, 96^2), 96, 96)
+    buf, (c, a, b) = carve(Float64, 96^2, 3)
+    a .= rand_f64(r, 96^2)
+    b .= rand_f64(r, 96^2)
+    return buf, reshape(c, 96, 96), reshape(a, 96, 96), reshape(b, 96, 96)
 end
-bench("matmul_loops"; ops = 96^3, setup = matmul_input) do (C, A, B)
+bench("matmul_loops"; ops = 96^3, setup = matmul_input) do (_, C, A, B)
     matmul!(C, A, B)
 end
 
@@ -59,7 +67,13 @@ bench("reinterpret_sum"; ops = 4N, setup = () -> rand_f32(SplitMix(4), 4N)) do x
     s, t
 end
 
-bench("permutedims_3d"; ops = 128 * 64 * 32, setup = () -> (reshape(rand_f64(SplitMix(5), 128 * 64 * 32), 128, 64, 32), zeros(32, 128, 64))) do (A, B)
+function permute_input()
+    n = 128 * 64 * 32
+    buf, (a, b) = carve(Float64, n, 2)
+    a .= rand_f64(SplitMix(5), n)
+    return buf, reshape(a, 128, 64, 32), reshape(b, 32, 128, 64)
+end
+bench("permutedims_3d"; ops = 128 * 64 * 32, setup = permute_input) do (_, A, B)
     permutedims!(B, A, (3, 1, 2))
 end
 

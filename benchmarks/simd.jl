@@ -95,9 +95,11 @@ end
 # Indexed loads that cannot vectorize on most targets: the scalar-loop quality baseline
 function gather_input()
     r = SplitMix(12)
-    return rand_f64(r, N), rand_int(r, 4N, 1, N)
+    buf1, (x,) = carve(N, Float64)
+    x .= rand_f64(r, N)
+    return buf1, x, rand_int(r, 4N, 1, N)
 end
-bench("gather_index"; ops = 4N, setup = gather_input) do (x, idx)
+bench("gather_index"; ops = 4N, setup = gather_input) do (_, x, idx)
     s = 0.0
     @inbounds for i in idx
         s += x[i]
@@ -131,9 +133,12 @@ end
 
 function complex_input()
     r = SplitMix(14)
-    return complex.(rand_f64(r, N, -1, 1), rand_f64(r, N, -1, 1)), complex.(rand_f64(r, N, -1, 1), rand_f64(r, N, -1, 1))
+    buf, (z, w) = carve(ComplexF64, N, 2)
+    z .= complex.(rand_f64(r, N, -1, 1), rand_f64(r, N, -1, 1))
+    w .= complex.(rand_f64(r, N, -1, 1), rand_f64(r, N, -1, 1))
+    return buf, z, w
 end
-bench("complex_mul_sum"; ops = N, setup = complex_input) do (z, w)
+bench("complex_mul_sum"; ops = N, setup = complex_input) do (_, z, w)
     s = zero(ComplexF64)
     @simd for i in eachindex(z, w)
         @inbounds s += z[i] * w[i]
