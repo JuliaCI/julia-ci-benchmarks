@@ -31,14 +31,14 @@ function shuffle_det!(r::SplitMix, v::AbstractVector)
 end
 
 """
-    carve(n, T1, T2, ...) -> (buffer, (v1::Vector{T1}, v2::Vector{T2}, ...))
-    carve(T, n, k)        -> (buffer, (v1, ..., vk))
+    carve(n, T1, T2, ...) -> (v1::Vector{T1}, v2::Vector{T2}, ...)
+    carve(T, n, k)        -> (v1, ..., vk)
 
 Vectors of `n` elements cut from one allocation at fixed offsets. Kernels that stream
 several arrays are sensitive to where the arrays lie relative to each other (cache-set
 and 4K-aliasing conflicts, worst for power-of-two sizes), and separate allocations land
-differently in every process: up to 7x in cycles with identical instructions. Keep
-`buffer` alive with the vectors (put it in the benchmark state).
+differently in every process: up to 7x in cycles with identical instructions. The vectors
+are zeroed. Their buffer is kept alive by the driver for the life of the process.
 """
 function carve(n::Integer, Ts::Type...)
     # Each vector starts on a page boundary plus a different multiple of 192 bytes
@@ -46,7 +46,8 @@ function carve(n::Integer, Ts::Type...)
     buf = zeros(UInt8, sum(sizes) + 4096)
     skip = (4096 - Int(UInt(pointer(buf)) % 4096)) % 4096
     offsets = cumsum([skip; sizes[1:end-1]])
-    vs = ntuple(j -> fill!(unsafe_wrap(Array, Ptr{Ts[j]}(pointer(buf, 1 + offsets[j])), n), zero(Ts[j])), length(Ts))
-    return buf, vs
+    push!(CARVED, buf)
+    return ntuple(j -> fill!(unsafe_wrap(Array, Ptr{Ts[j]}(pointer(buf, 1 + offsets[j])), n), zero(Ts[j])), length(Ts))
 end
+const CARVED = Vector{UInt8}[]
 carve(::Type{T}, n::Integer, k::Integer) where {T} = carve(n, ntuple(_ -> T, k)...)

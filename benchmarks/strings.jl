@@ -11,7 +11,7 @@ function log_input()
 end
 # End of the shared part.
 
-function csv_input()
+function split_join_setup()
     r = SplitMix(1)
     rows = String[]
     for i in 1:4096
@@ -19,8 +19,7 @@ function csv_input()
     end
     return rows
 end
-
-bench("split_join"; ops = 4096, setup = csv_input) do rows
+function split_join(rows)
     n = 0
     for row in rows
         parts = split(row, ',')
@@ -28,8 +27,10 @@ bench("split_join"; ops = 4096, setup = csv_input) do rows
     end
     n
 end
+bench(split_join, split_join_setup; ops = 4096)
 
-bench("interpolate"; ops = 4096, setup = () -> (rand_int(SplitMix(2), 4096, 0, 10^9), rand_f64(SplitMix(3), 4096))) do (ints, floats)
+interpolate_setup() = (rand_int(SplitMix(2), 4096, 0, 10^9), rand_f64(SplitMix(3), 4096))
+function interpolate(ints, floats)
     n = 0
     for i in eachindex(ints)
         s = "item $(ints[i]) of $(i): value=$(floats[i]) [$(isodd(i) ? "odd" : "even")]"
@@ -37,14 +38,15 @@ bench("interpolate"; ops = 4096, setup = () -> (rand_int(SplitMix(2), 4096, 0, 1
     end
     n
 end
+bench(interpolate, interpolate_setup; ops = 4096)
 
-function numbers_input()
+function parse_numbers_setup()
     r = SplitMix(4)
     ints = string.(rand_int(r, 8192, -10^12, 10^12))
     floats = string.(rand_f64(r, 8192, -1e6, 1e6) .* exp.(rand_f64(r, 8192, -20.0, 20.0)))
     return ints, floats
 end
-bench("parse_numbers"; ops = 16384, setup = numbers_input) do (ints, floats)
+function parse_numbers(ints, floats)
     s = 0
     t = 0.0
     for v in ints
@@ -55,13 +57,14 @@ bench("parse_numbers"; ops = 16384, setup = numbers_input) do (ints, floats)
     end
     s, t
 end
+bench(parse_numbers, parse_numbers_setup; ops = 16384)
 
 # Shortest round-trip float printing (Ryu) and integer printing
-function print_input()
+function print_numbers_setup()
     r = SplitMix(5)
     return rand_f64(r, 8192, -1e6, 1e6) .* exp.(rand_f64(r, 8192, -20.0, 20.0)), rand_int(r, 8192, -10^15, 10^15)
 end
-bench("print_numbers"; ops = 16384, setup = print_input) do (fs, is)
+function print_numbers(fs, is)
     n = 0
     for v in fs
         n += sizeof(string(v))
@@ -71,9 +74,11 @@ bench("print_numbers"; ops = 16384, setup = print_input) do (fs, is)
     end
     n
 end
+bench(print_numbers, print_numbers_setup; ops = 16384)
 
 # PCRE with JIT, captures turned into SubStrings
-bench("regex_captures"; ops = 4096, setup = log_input) do lines
+regex_captures_setup() = log_input()
+function regex_captures(lines)
     re = r"^(\d{4})-(\d\d)-(\d\d)T[\d:]+ (ERROR|WARN) \[worker-(\d+)\] took (\d+) ms$"
     s = 0
     for l in lines
@@ -83,29 +88,36 @@ bench("regex_captures"; ops = 4096, setup = log_input) do lines
     end
     s
 end
+bench(regex_captures, regex_captures_setup; ops = 4096)
 
 # Non-ASCII text: character iteration, classification and case mapping (utf8proc)
 const TEXT = repeat("Größenwahn naïve café Ωμέγα 日本語のテキスト emoji 🎉 and plain ASCII words. ", 400)
-bench("unicode_iterate"; ops = length(TEXT), setup = () -> TEXT) do s
+unicode_iterate_setup() = TEXT
+function unicode_iterate(s)
     n = 0
     for c in s
         n += isletter(c) + isuppercase(c) + (c == ' ')
     end
     n + length(uppercase(s)) + length(s)
 end
+bench(unicode_iterate, unicode_iterate_setup; ops = length(TEXT))
 
-bench("replace_search"; ops = 1, setup = () -> join(log_input(), '\n')) do s
+replace_search_setup() = join(log_input(), '\n')
+function replace_search(s)
     t = replace(s, "ERROR" => "E", "WARN" => "W", r"worker-(\d+)" => s"w\1")
     occursin("took 9999 ms", t) + length(findall("ms\n", t)) + sizeof(t)
 end
+bench(replace_search, replace_search_setup; ops = 1)
 
 # The symbol table is a lock-protected hash table in the C runtime
-bench("symbol_intern"; ops = 8192, setup = () -> ["sym_$(i % 3000)_$(i % 7)" for i in 1:8192]) do strs
+symbol_intern_setup() = ["sym_$(i % 3000)_$(i % 7)" for i in 1:8192]
+function symbol_intern(strs)
     n = 0
     for s in strs
         n += sizeof(String(Symbol(s)))
     end
     n
 end
+bench(symbol_intern, symbol_intern_setup; ops = 8192)
 
 end

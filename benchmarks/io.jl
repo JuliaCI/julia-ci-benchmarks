@@ -4,23 +4,33 @@ module IOBench
 using ..Driver
 using Serialization
 
-bench("iobuffer_print"; ops = 8192, setup = () -> (rand_int(SplitMix(1), 8192, -10^9, 10^9), rand_f64(SplitMix(2), 8192))) do (is, fs)
+iobuffer_print_setup() = (rand_int(SplitMix(1), 8192, -10^9, 10^9), rand_f64(SplitMix(2), 8192))
+function iobuffer_print(is, fs)
     io = IOBuffer()
     for i in eachindex(is)
         print(io, is[i], '\t', fs[i], '\t', :sym, '\t', "text", '\n')
     end
-    position(io)
+    return position(io)
 end
+bench(iobuffer_print, iobuffer_print_setup; ops = 8192)
 
-bench("readline_parse"; ops = 8192, setup = () -> String(take!(let io = IOBuffer(); for i in 1:8192; println(io, i, ",", i * 0.5, ",field", i % 10); end; io end))) do s
+function readline_parse_setup()
+    io = IOBuffer()
+    for i in 1:8192
+        println(io, i, ",", i * 0.5, ",field", i % 10)
+    end
+    return String(take!(io))
+end
+function readline_parse(s)
     io = IOBuffer(s)
     t = 0.0
     for l in eachline(io)
         a, b, _ = split(l, ',')
         t += parse(Int, a) + parse(Float64, b)
     end
-    t
+    return t
 end
+bench(readline_parse, readline_parse_setup; ops = 8192)
 
 struct Rec
     id::Int
@@ -28,23 +38,24 @@ struct Rec
     vals::Vector{Float64}
     tags::Dict{Symbol,Any}
 end
-function ser_input()
+function serialize_roundtrip_setup()
     r = SplitMix(3)
     return [Rec(i, "rec$i", rand_f64(r, 16), Dict{Symbol,Any}(:a => i, :b => "x$i", :c => (i, 1.5))) for i in 1:512]
 end
-bench("serialize_roundtrip"; ops = 512, setup = ser_input) do recs
+function serialize_roundtrip(recs)
     io = IOBuffer()
     serialize(io, recs)
     seekstart(io)
-    length(deserialize(io))
+    return length(deserialize(io))
 end
+bench(serialize_roundtrip, serialize_roundtrip_setup; ops = 512)
 
 # 4 MiB written and read back in 64 KiB chunks
-function file_input()
+function file_roundtrip_setup()
     path = tempname()
     return path, UInt8.(rand_int(SplitMix(4), 2^16, 0, 255))
 end
-bench("file_roundtrip"; ops = 64, setup = file_input, tolerance = 0.15) do (path, chunk)
+function file_roundtrip(path, chunk)
     open(path, "w") do f
         for _ in 1:64
             write(f, chunk)
@@ -58,7 +69,8 @@ bench("file_roundtrip"; ops = 64, setup = file_input, tolerance = 0.15) do (path
             n += buf[1]
         end
     end
-    n
+    return n
 end
+bench(file_roundtrip, file_roundtrip_setup; ops = 64, tolerance = 0.15)
 
 end

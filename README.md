@@ -148,42 +148,57 @@ machine, the settings, the suite commit, Buildkite variables and any failed proc
 `compare.jl` adds `report.md` and, for two arms, `compare.json` with the per-benchmark and
 per-category verdicts.
 
+## Defining a benchmark
+
+A benchmark is an ordinary function, registered with the driver in a separate line:
+
+```julia
+# benchmarks/simd.jl, inside the category's module
+function axpy_alias_check_setup()
+    y, x = carve(Float64, 2^18, 2)
+    copyto!(y, rand_f64(SplitMix(6), 2^18))
+    copyto!(x, rand_f64(SplitMix(7), 2^18))
+    return y, x
+end
+
+# No @simd: two arrays that may alias, so LLVM must emit a runtime overlap check
+function axpy_alias_check(y, x)
+    @inbounds for i in eachindex(x, y)
+        y[i] += 1.0000001 * x[i]
+    end
+    return y
+end
+
+bench(axpy_alias_check, axpy_alias_check_setup; ops = 2^18)
+```
+
+The benchmark is named after the kernel (`simd/axpy_alias_check`). `setup()` returns the
+kernel's arguments, built once, and one sample is one call `kernel(args...)`. Keywords:
+`reset` (called with the same arguments, untimed, before each sample, for kernels that
+mutate their input), `ops` (work items per call), `seconds` (sampling budget), `metric`
+(`"cycles"` or `"time"`), `tolerance` (overrides the comparison threshold), `min_threads`.
+
+Each benchmark is a self-contained block, its setup and helpers directly above its
+`bench` line, with literal sizes rather than file-level constants. A few files
+(`compiler`, `types`, `runtime`, `strings`) start with a part shared by several of their
+benchmarks, between `# Shared by the benchmarks below` and `# End of the shared part.`.
+`julia -t 4 tools/check_blocks.jl` checks that every block runs on its own.
+
 ## Running one benchmark locally
 
-Every benchmark is a self-contained block, its helpers and input function directly above
-its `bench` call, so it can be pasted into a REPL. Outside a suite run, `bench` runs the
-benchmark right away and prints a summary:
+Paste the functions into a REPL and call the kernel like any function, or time it with
+whatever you like:
 
 ```julia
-julia> include("driver/Driver.jl"); using .Driver
+julia> axpy_alias_check(rand(1000), rand(1000))       # plain call
 
-julia> # paste any block from benchmarks/*.jl, e.g. simd/axpy_alias_check
-axpy_alias_check: min 56.54 µs (median 57.75 µs) · 0.2 ns/op · 226.2k cycles · 526.3k instructions · 0 allocs · 300 samples
+julia> include("driver/Driver.jl"); using .Driver    # the suite's harness
+
+julia> bench(axpy_alias_check, axpy_alias_check_setup; ops = 2^18)
+axpy_alias_check: min 57.46 µs (median 57.71 µs) · 0.2 ns/op · 226.1k cycles · 526.1k instructions · 0 allocs · 300 samples
 ```
 
-It returns the full record (every sample's time and counters). A few files (`compiler`,
-`types`, `runtime`, `strings`) start with a part shared by several of their benchmarks,
-between `# Shared by the benchmarks below` and `# End of the shared part.`; paste that
-first. `parallel` needs a REPL started with `-t 4`. From the shell,
-`julia run.jl --category=simd --filter=axpy` runs the same benchmark as the suite does.
-
-`tools/check_blocks.jl` checks that every block runs on its own this way.
-
-## Adding a benchmark
-
-```julia
-# benchmarks/<category>.jl, inside the category's module
-bench("name"; ops = 2^16, setup = () -> rand_f64(SplitMix(42), 2^16)) do x
-    # one call of this is one sample
-    sum(abs2, x)
-end
-```
-
-Keywords: `setup` (builds state once), `reset` (untimed, before each sample), `ops`
-(work items per call), `seconds` (sampling budget), `metric` (`"cycles"` or `"time"`),
-`tolerance` (overrides the comparison threshold), `min_threads`.
-
-Keep the block self-contained: literal sizes rather than file-level constants, helpers
-directly above the `bench` call, and input that `reset` restores kept in the state (not
-in a `const`, so pasting a block twice works). Run `julia -t 4 tools/check_blocks.jl`
-before committing.
+Outside a suite run, `bench` runs the benchmark right away and returns the record (every
+sample's time and counters). For the shared files, paste the shared part first;
+`parallel` needs a REPL started with `-t 4`. From the shell,
+`julia run.jl --category=simd --filter=axpy` runs it exactly as the suite does.

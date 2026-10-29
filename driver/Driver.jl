@@ -32,20 +32,24 @@ const MIN_SAMPLES = 5
 const MAX_SAMPLES = 300
 
 """
-    bench(kernel, name; setup, reset, ops, seconds, min_threads, counters, tolerance)
+    bench(kernel, [setup]; reset, ops, seconds, min_threads, metric, tolerance)
 
-Register `kernel(state)` as benchmark `<category>/<name>`. `state = setup()` is built once.
-`reset(state)`, when given, runs untimed before every sample, for kernels that consume or
-mutate their input. One sample is one call of `kernel`, never a tuned number of calls, so
-a kernel should do at least ~20 µs of work. `ops` is the number of work items per call and
-only scales the reported time per item. `metric` is what a comparison judges: `"cycles"`
-of the calling thread, or `"time"` for work that leaves it (other threads, parallel GC
-marking). `tolerance` overrides the comparison threshold for that metric.
+Register the benchmark `<category>/<name of kernel>`. `args = setup()` is built once, a
+tuple of arguments (or a single one), and one sample is one call `kernel(args...)`, never
+a tuned number of calls, so a kernel should do at least ~20 µs of work. Without `setup`
+the kernel takes no arguments. `reset(args...)`, when given, runs untimed before every
+sample, for kernels that consume or mutate their input. `ops` is the number of work items
+per call and only scales the reported time per item. `metric` is what a comparison
+judges: `"cycles"` of the calling thread, or `"time"` for work that leaves it (other
+threads, parallel GC marking). `tolerance` overrides the comparison threshold.
+
+Outside a suite run (the definitions pasted into a REPL) the benchmark runs right away.
 """
-function bench(kernel, name::String; setup = () -> nothing, reset = nothing, ops::Int = 1,
+function bench(kernel, setup = () -> (); reset = nothing, ops::Int = 1,
                seconds::Real = DEFAULT_SECONDS, min_threads::Int = 1, metric::String = "cycles",
                tolerance::Real = 0.0)
     metric in ("cycles", "time") || error("unknown metric $metric")
+    name = string(nameof(kernel))
     interactive = isempty(CATEGORY[])
     full = interactive ? name : string(CATEGORY[], "/", name)
     b = Bench(full, kernel, setup, reset, ops, Float64(seconds), min_threads, metric, Float64(tolerance))
@@ -86,15 +90,29 @@ function run_one(b::Bench, backend::CounterBackend, seconds_scale::Float64)
     if Threads.nthreads() < b.min_threads
         return (; status = "skipped", error = "needs $(b.min_threads) threads, have $(Threads.nthreads())")
     end
-    state = b.setup()
+    args = b.setup()
+    args isa Tuple || (args = (args,))
+    budget = round(Int, b.seconds * seconds_scale * 1e9)
+    # A function barrier, so the timed call is compiled for the kernel and its arguments
+    times, allocs, bytes, gc_ns, counts = measure(b.kernel, b.reset, args, backend, budget)
+    counters = Dict{String,Any}()
+    for k in eachindex(counts)
+        counters[backend.names[k]] = counts[k]
+    end
+    return (; status = "ok", error = nothing, ops = b.ops, times_ns = times,
+            min_ns = minimum(times), median_ns = median_of(times),
+            allocs = minimum(allocs), bytes = minimum(bytes), gc_ns = gc_ns,
+            counters = counters, metric = b.metric, tolerance = b.tolerance == 0 ? nothing : b.tolerance)
+end
+
+function measure(kernel::F, reset::R, args::A, backend::CounterBackend, budget::Int) where {F,R,A}
     # Two untimed calls: the first compiles, the second settles caches and lazy state
     for _ in 1:2
-        b.reset === nothing || b.reset(state)
-        Base.donotdelete(b.kernel(state))
+        reset === nothing || reset(args...)
+        Base.donotdelete(kernel(args...))
     end
     GC.gc()
-    use_counters = backend.kind != :none
-    ncounters = use_counters ? length(backend.names) : 0
+    ncounters = backend.kind == :none ? 0 : length(backend.names)
     times = Int[]
     allocs = Int[]
     bytes = Int[]
@@ -102,16 +120,15 @@ function run_one(b::Bench, backend::CounterBackend, seconds_scale::Float64)
     counts = [Int[] for _ in 1:ncounters]
     c0 = zeros(UInt64, max(ncounters, 1))
     c1 = zeros(UInt64, max(ncounters, 1))
-    budget = round(Int, b.seconds * seconds_scale * 1e9)
     start = time_ns()
     while true
-        b.reset === nothing || b.reset(state)
+        reset === nothing || reset(args...)
         g0 = Base.gc_num()
-        use_counters && read_counters!(backend, c0)
+        ncounters > 0 && read_counters!(backend, c0)
         t0 = time_ns()
-        r = b.kernel(state)
+        r = kernel(args...)
         t1 = time_ns()
-        use_counters && read_counters!(backend, c1)
+        ncounters > 0 && read_counters!(backend, c1)
         g1 = Base.gc_num()
         Base.donotdelete(r)
         d = Base.GC_Diff(g1, g0)
@@ -123,17 +140,9 @@ function run_one(b::Bench, backend::CounterBackend, seconds_scale::Float64)
             push!(counts[k], Int(c1[k] - c0[k]))
         end
         n = length(times)
-        elapsed = time_ns() - start
-        (n >= MAX_SAMPLES || (n >= MIN_SAMPLES && elapsed >= budget)) && break
+        (n >= MAX_SAMPLES || (n >= MIN_SAMPLES && time_ns() - start >= budget)) && break
     end
-    counters = Dict{String,Any}()
-    for k in 1:ncounters
-        counters[backend.names[k]] = counts[k]
-    end
-    return (; status = "ok", error = nothing, ops = b.ops, times_ns = times,
-            min_ns = minimum(times), median_ns = median_of(times),
-            allocs = minimum(allocs), bytes = minimum(bytes), gc_ns = gc_ns,
-            counters = counters, metric = b.metric, tolerance = b.tolerance == 0 ? nothing : b.tolerance)
+    return times, allocs, bytes, gc_ns, counts
 end
 
 # Run every registered benchmark whose name matches `filter`, writing one JSON line per

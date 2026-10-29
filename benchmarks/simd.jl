@@ -5,105 +5,107 @@ module SIMDBench
 using ..Driver
 
 # Reassociation allowed by @simd: a vectorized, unrolled reduction
-bench("sum_f64_simd"; ops = 2^20, setup = () -> rand_f64(SplitMix(1), 2^20)) do x
+sum_f64_simd_setup() = rand_f64(SplitMix(1), 2^20)
+function sum_f64_simd(x)
     s = 0.0
     @simd for i in eachindex(x)
         @inbounds s += x[i]
     end
-    s
+    return s
 end
+bench(sum_f64_simd, sum_f64_simd_setup; ops = 2^20)
 
 # Base's own pairwise mapreduce, the path behind sum/prod/maximum on arrays
-bench("sum_f32_base"; ops = 2^20, setup = () -> rand_f32(SplitMix(2), 2^20)) do x
-    sum(abs2, x)
-end
+sum_f32_base_setup() = rand_f32(SplitMix(2), 2^20)
+sum_f32_base(x) = sum(abs2, x)
+bench(sum_f32_base, sum_f32_base_setup; ops = 2^20)
 
 # NaN- and signed-zero-aware reductions, which only vectorize with care
-bench("maximum_f64"; ops = 2^18, setup = () -> rand_f64(SplitMix(3), 2^18, -1e3, 1e3)) do x
-    maximum(x) - minimum(x)
-end
+maximum_f64_setup() = rand_f64(SplitMix(3), 2^18, -1e3, 1e3)
+maximum_f64(x) = maximum(x) - minimum(x)
+bench(maximum_f64, maximum_f64_setup; ops = 2^18)
 
-function dot_input()
-    buf, (x, y) = carve(Float32, 2^20, 2)
+function dot_f32_fma_setup()
+    x, y = carve(Float32, 2^20, 2)
     copyto!(x, rand_f32(SplitMix(4), 2^20))
     copyto!(y, rand_f32(SplitMix(5), 2^20))
-    return buf, x, y
+    return x, y
 end
-bench("dot_f32_fma"; ops = 2^20, setup = dot_input) do (_, x, y)
+function dot_f32_fma(x, y)
     s = 0.0f0
     @simd for i in eachindex(x, y)
         @inbounds s = muladd(x[i], y[i], s)
     end
-    s
+    return s
 end
+bench(dot_f32_fma, dot_f32_fma_setup; ops = 2^20)
 
-# No @simd: two arrays that may alias, so LLVM must emit a runtime overlap check
-# before it can vectorize. Lost when Julia's aliasing information regresses.
-function axpy!(y, a, x)
+# No @simd: two arrays that may alias, so LLVM must emit a runtime overlap check before
+# it can vectorize. Lost when Julia's aliasing information regresses.
+function axpy_alias_check_setup()
+    y, x = carve(Float64, 2^18, 2)
+    copyto!(y, rand_f64(SplitMix(6), 2^18))
+    copyto!(x, rand_f64(SplitMix(7), 2^18))
+    return y, x
+end
+function axpy_alias_check(y, x)
     @inbounds for i in eachindex(x, y)
-        y[i] += a * x[i]
+        y[i] += 1.0000001 * x[i]
     end
     return y
 end
-function axpy_input()
-    buf, (y, x) = carve(Float64, 2^18, 2)
-    copyto!(y, rand_f64(SplitMix(6), 2^18))
-    copyto!(x, rand_f64(SplitMix(7), 2^18))
-    return buf, y, x
-end
-bench("axpy_alias_check"; ops = 2^18, setup = axpy_input) do (_, y, x)
-    axpy!(y, 1.0000001, x)
-end
+bench(axpy_alias_check, axpy_alias_check_setup; ops = 2^18)
 
 # A fused broadcast over five arrays; the broadcast machinery must inline completely
-function bcast_input()
+function broadcast_fused_setup()
     r = SplitMix(8)
-    buf, vs = carve(Float64, 2^18, 5)
+    vs = carve(Float64, 2^18, 5)
     foreach(v -> copyto!(v, rand_f64(r, 2^18)), vs)
-    return buf, vs
+    return vs
 end
-bench("broadcast_fused"; ops = 2^18, setup = bcast_input) do (_, (y, a, b, c, d))
-    y .= 2.0 .* a .+ b .* c .- d ./ 3.0
-end
+broadcast_fused(y, a, b, c, d) = y .= 2.0 .* a .+ b .* c .- d ./ 3.0
+bench(broadcast_fused, broadcast_fused_setup; ops = 2^18)
 
 # Broadcasting a matrix against a row and a column needs index extrusion
-function bcast2d_input()
+function broadcast_2d_extrude_setup()
     r = SplitMix(9)
     return reshape(rand_f64(r, 512 * 512), 512, 512), rand_f64(r, 512), rand_f64(r, 512)
 end
-bench("broadcast_2d_extrude"; ops = 512 * 512, setup = bcast2d_input) do (A, col, row)
-    A .= A .* col .+ row' .- 1.0
-end
+broadcast_2d_extrude(A, col, row) = A .= A .* col .+ row' .- 1.0
+bench(broadcast_2d_extrude, broadcast_2d_extrude_setup; ops = 512 * 512)
 
 # A data-dependent select that must become a vector blend rather than a branch
-bench("conditional_select"; ops = 2^18, setup = () -> rand_f64(SplitMix(10), 2^18, -1.0, 1.0)) do x
+conditional_select_setup() = rand_f64(SplitMix(10), 2^18, -1.0, 1.0)
+function conditional_select(x)
     s = 0.0
     @simd for i in eachindex(x)
         @inbounds v = x[i]
         s += ifelse(v > 0, v, -2v)
     end
-    s
+    return s
 end
+bench(conditional_select, conditional_select_setup; ops = 2^18)
 
 # Narrow integers: sixteen lanes per vector, widening adds
-bench("count_bytes"; ops = 2^20, setup = () -> UInt8.(rand_int(SplitMix(11), 2^20, 0, 255))) do x
-    count(>(0x80), x) + Int(sum(x))
-end
+count_bytes_setup() = UInt8.(rand_int(SplitMix(11), 2^20, 0, 255))
+count_bytes(x) = count(>(0x80), x) + Int(sum(x))
+bench(count_bytes, count_bytes_setup; ops = 2^20)
 
 # Indexed loads that cannot vectorize on most targets: the scalar-loop quality baseline
-function gather_input()
+function gather_index_setup()
     r = SplitMix(12)
-    buf1, (x,) = carve(2^16, Float64)
+    (x,) = carve(2^16, Float64)
     x .= rand_f64(r, 2^16)
-    return buf1, x, rand_int(r, 2^18, 1, 2^16)
+    return x, rand_int(r, 2^18, 1, 2^16)
 end
-bench("gather_index"; ops = 2^18, setup = gather_input) do (_, x, idx)
+function gather_index(x, idx)
     s = 0.0
     @inbounds for i in idx
         s += x[i]
     end
-    s
+    return s
 end
+bench(gather_index, gather_index_setup; ops = 2^18)
 
 # Tuples of four floats: straight-line code the SLP vectorizer should pack
 function quat_mul(a::NTuple{4,Float64}, b::NTuple{4,Float64})
@@ -114,34 +116,35 @@ function quat_mul(a::NTuple{4,Float64}, b::NTuple{4,Float64})
             a1 * b3 - a2 * b4 + a3 * b1 + a4 * b2,
             a1 * b4 + a2 * b3 - a3 * b2 + a4 * b1)
 end
-function quat_input()
-    r = SplitMix(13)
-    x = rand_f64(r, 2^18, -1.0, 1.0)
+function tuple_slp_quat_setup()
+    x = rand_f64(SplitMix(13), 2^18, -1.0, 1.0)
     return [(x[i], x[i+1], x[i+2], x[i+3]) for i in 1:4:2^18]
 end
-bench("tuple_slp_quat"; ops = 2^16, setup = quat_input) do q
+function tuple_slp_quat(q)
     acc = (1.0, 0.0, 0.0, 0.0)
     @inbounds for v in q
         acc = quat_mul(acc, v)
         n = 1 / sqrt(acc[1]^2 + acc[2]^2 + acc[3]^2 + acc[4]^2)
         acc = acc .* n
     end
-    acc
+    return acc
 end
+bench(tuple_slp_quat, tuple_slp_quat_setup; ops = 2^16)
 
-function complex_input()
+function complex_mul_sum_setup()
     r = SplitMix(14)
-    buf, (z, w) = carve(ComplexF64, 2^16, 2)
+    z, w = carve(ComplexF64, 2^16, 2)
     z .= complex.(rand_f64(r, 2^16, -1, 1), rand_f64(r, 2^16, -1, 1))
     w .= complex.(rand_f64(r, 2^16, -1, 1), rand_f64(r, 2^16, -1, 1))
-    return buf, z, w
+    return z, w
 end
-bench("complex_mul_sum"; ops = 2^16, setup = complex_input) do (_, z, w)
+function complex_mul_sum(z, w)
     s = zero(ComplexF64)
     @simd for i in eachindex(z, w)
         @inbounds s += z[i] * w[i]
     end
-    s
+    return s
 end
+bench(complex_mul_sum, complex_mul_sum_setup; ops = 2^16)
 
 end

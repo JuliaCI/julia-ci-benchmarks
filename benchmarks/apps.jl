@@ -10,6 +10,11 @@ struct Body
     vel::NTuple{3,Float64}
     m::Float64
 end
+function nbody_setup()
+    r = SplitMix(1)
+    x = [Body(Tuple(rand_f64(r, 3, -1, 1)), Tuple(rand_f64(r, 3, -0.1, 0.1)), rand_f64(r, 1, 0.5, 2)[1]) for _ in 1:32]
+    return copy(x), x
+end
 function nbody_step!(bs::Vector{Body}, dt)
     n = length(bs)
     @inbounds for i in 1:n
@@ -28,17 +33,13 @@ function nbody_step!(bs::Vector{Body}, dt)
         bs[i] = Body(b.pos .+ dt .* b.vel, b.vel, b.m)
     end
 end
-function nbody_input()
-    r = SplitMix(1)
-    return [Body(Tuple(rand_f64(r, 3, -1, 1)), Tuple(rand_f64(r, 3, -0.1, 0.1)), rand_f64(r, 1, 0.5, 2)[1]) for _ in 1:32]
-end
-bench("nbody"; ops = 100 * 32^2, setup = () -> (x = nbody_input(); (copy(x), x)),
-      reset = ((bs, x),) -> copyto!(bs, x)) do (bs, _)
+function nbody(bs, _)
     for _ in 1:100
         nbody_step!(bs, 0.001)
     end
     bs[1].pos[1]
 end
+bench(nbody, nbody_setup; ops = 100 * 32^2, reset = (v, x) -> copyto!(v, x))
 
 # Escape-time iteration: data-dependent trip counts, complex arithmetic
 function mandel(c::ComplexF64, maxit)
@@ -49,15 +50,17 @@ function mandel(c::ComplexF64, maxit)
     end
     return maxit
 end
-bench("mandelbrot"; ops = 200 * 150) do _
+function mandelbrot()
     s = 0
     for j in 1:150, i in 1:200
         s += mandel(complex(-2.2 + 3.0 * i / 200, -1.2 + 2.4 * j / 150), 80)
     end
     s
 end
+bench(mandelbrot; ops = 200 * 150)
 
 # Spectral norm: an implicitly defined matrix, integer-to-float conversions, dot products
+spectralnorm_setup() = (ones(200), zeros(200), zeros(200))
 A(i, j) = 1.0 / ((i + j) * (i + j + 1) / 2 + i + 1)
 function Av!(y, x)
     n = length(x)
@@ -81,7 +84,7 @@ function Atv!(y, x)
     end
     return y
 end
-bench("spectralnorm"; ops = 10 * 4 * 200^2, setup = () -> (ones(200), zeros(200), zeros(200))) do (u, v, t)
+function spectralnorm(u, v, t)
     fill!(u, 1.0)
     for _ in 1:10
         Atv!(v, Av!(t, u))
@@ -89,10 +92,11 @@ bench("spectralnorm"; ops = 10 * 4 * 200^2, setup = () -> (ones(200), zeros(200)
     end
     sqrt(sum(u .* v) / sum(v .* v))
 end
+bench(spectralnorm, spectralnorm_setup; ops = 10 * 4 * 200^2)
 
 # Fannkuch: permutations and prefix reversals of small integer arrays, very branchy
 # (the benchmarks-game algorithm)
-function fannkuch(n)
+function fannkuch_count(n)
     p = collect(1:n)
     q = similar(p)
     s = collect(1:n)
@@ -147,12 +151,12 @@ function fannkuch(n)
         end
     end
 end
-bench("fannkuch"; ops = factorial(8)) do _
-    fannkuch(8)
-end
+fannkuch() = fannkuch_count(8)
+bench(fannkuch; ops = factorial(8))
 
 # A JSON parser over UInt8s into Dict{String,Any}/Vector{Any}: type-unstable values,
 # string building, recursion
+json_parse_setup() = Vector{UInt8}(gen_json(SplitMix(2), 10))
 function gen_json(r, depth)
     k = Driver.next!(r) % 6
     depth == 0 && (k = k % 3)
@@ -212,10 +216,11 @@ function jparse(b::Vector{UInt8}, i::Int)
         return (isfloat ? parse(Float64, s) : parse(Int, s)), j
     end
 end
-bench("json_parse"; setup = () -> Vector{UInt8}(gen_json(SplitMix(2), 10))) do b
+function json_parse(b)
     v, _ = jparse(b, 1)
     length(v)
 end
+bench(json_parse, json_parse_setup)
 
 # A bytecode interpreter: a dispatch loop over opcodes, an operand stack, data-dependent
 # jumps. The program counts the primes below 5000 by trial division.
@@ -256,6 +261,7 @@ const PRIMES = assemble(Any[
     :done,
     (HALT,),
 ])
+bytecode_interpreter_setup() = PRIMES
 function interpret(code::Vector{Int})
     stack = zeros(Int, 16)
     vars = zeros(Int, 4)
@@ -292,12 +298,12 @@ function interpret(code::Vector{Int})
         end
     end
 end
-bench("bytecode_interpreter"; setup = () -> PRIMES) do p
-    interpret(p)
-end
+bytecode_interpreter(p) = interpret(p)
+bench(bytecode_interpreter, bytecode_interpreter_setup)
 
 # LU with partial pivoting, bounds checks left on: bounds-check elimination and
 # loop codegen without @inbounds
+lu_checked_setup() = (x = reshape(rand_f64(SplitMix(3), 160^2, -1, 1), 160, 160); (copy(x), x))
 function lu_nopivot!(A)
     n = size(A, 1)
     for k in 1:n
@@ -323,10 +329,8 @@ function lu_nopivot!(A)
     end
     return A
 end
-lu_input() = (x = reshape(rand_f64(SplitMix(3), 160^2, -1, 1), 160, 160); (copy(x), x))
-bench("lu_checked"; ops = 160^3 ÷ 3, setup = lu_input, reset = ((A, x),) -> copyto!(A, x)) do (A, _)
-    lu_nopivot!(A)[end, end]
-end
+lu_checked(A, _) = lu_nopivot!(A)[end, end]
+bench(lu_checked, lu_checked_setup; ops = 160^3 ÷ 3, reset = (v, x) -> copyto!(v, x))
 
 # RK4 on the Lorenz system with tuples, the StaticArrays style without the package
 lorenz(u) = (10.0 * (u[2] - u[1]), u[1] * (28.0 - u[3]) - u[2], u[1] * u[2] - 8 / 3 * u[3])
@@ -340,12 +344,11 @@ function rk4(u, h, n)
     end
     return u
 end
-bench("ode_rk4_tuples"; ops = 2^16) do _
-    rk4((1.0, 0.0, 0.0), 1e-3, 2^16)
-end
+ode_rk4_tuples() = rk4((1.0, 0.0, 0.0), 1e-3, 2^16)
+bench(ode_rk4_tuples; ops = 2^16)
 
 # Breadth-first search over a random sparse graph: pointer chasing and a queue
-function graph_input()
+function graph_bfs_setup()
     r = SplitMix(4)
     n = 2^15
     adj = [Int[] for _ in 1:n]
@@ -355,7 +358,7 @@ function graph_input()
     end
     return adj, zeros(Int, n)
 end
-bench("graph_bfs"; ops = 2^15, setup = graph_input) do (adj, dist)
+function graph_bfs(adj, dist)
     fill!(dist, -1)
     q = [1]
     dist[1] = 0
@@ -372,5 +375,6 @@ bench("graph_bfs"; ops = 2^15, setup = graph_input) do (adj, dist)
     end
     sum(dist)
 end
+bench(graph_bfs, graph_bfs_setup; ops = 2^15)
 
 end

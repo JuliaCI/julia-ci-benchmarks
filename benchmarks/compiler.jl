@@ -46,18 +46,21 @@ end
 const BIG_SRC = large_function_src()
 # End of the shared part.
 
-bench("parse"; ops = sizeof(SRC), setup = () -> SRC) do src
-    length(Meta.parseall(src).args)
-end
+parse_file_setup() = SRC
+parse_file(src) = length(Meta.parseall(src).args)
+bench(parse_file, parse_file_setup; ops = sizeof(SRC))
 
-bench("lower"; setup = () -> (Meta.parseall(SRC), Ref{Module}()), reset = st -> (st[2][] = fresh_module())) do (ex, mref)
+# The Ref holds the module to lower into, which reset makes fresh: lower_file(ex, Ref(fresh_module()))
+lower_file_setup() = (Meta.parseall(SRC), Ref{Module}())
+function lower_file(ex, mod_ref)
     n = 0
     for e in ex.args
         e isa LineNumberNode && continue
-        n += length(string(typeof(Meta.lower(mref[], e))))
+        n += length(string(typeof(Meta.lower(mod_ref[], e))))
     end
     n
 end
+bench(lower_file, lower_file_setup; reset = (ex, mod_ref) -> (mod_ref[] = fresh_module()))
 
 # Lowering passes the workload touches lightly: closure conversion, keyword-method
 # generation, destructuring, do-blocks, comprehensions and try/finally
@@ -96,14 +99,16 @@ function kwheavy(a, b = 2, c...; scale::Float64 = 1.0, offset = 0, flags::Tuple 
     return (; r, m, d, t, kws = values(kws), flags)
 end
 """
-bench("lower_closures_kwargs"; setup = () -> (Meta.parseall(LOWER_SRC), Ref{Module}()), reset = st -> (st[2][] = fresh_module())) do (ex, mref)
+lower_closures_kwargs_setup() = (Meta.parseall(LOWER_SRC), Ref{Module}())
+function lower_closures_kwargs(ex, mod_ref)
     n = 0
     for _ in 1:4, e in ex.args
         e isa LineNumberNode && continue
-        n += length(string(typeof(Meta.lower(mref[], e))))
+        n += length(string(typeof(Meta.lower(mod_ref[], e))))
     end
     n
 end
+bench(lower_closures_kwargs, lower_closures_kwargs_setup; reset = (ex, mod_ref) -> (mod_ref[] = fresh_module()))
 
 const MACRO_SRC = """
 Base.@kwdef struct Options
@@ -126,14 +131,16 @@ function kernel!(y, x, a)
     return y, s, r, Options(; name = "x")
 end
 """
-bench("macroexpand"; setup = () -> (Meta.parseall(MACRO_SRC), Ref{Module}()), reset = st -> (st[2][] = fresh_module())) do (ex, mref)
+macroexpand_block_setup() = (Meta.parseall(MACRO_SRC), Ref{Module}())
+function macroexpand_block(ex, mod_ref)
     n = 0
     for _ in 1:20, e in ex.args
         e isa LineNumberNode && continue
-        n += length(string(typeof(macroexpand(mref[], e))))
+        n += length(string(typeof(macroexpand(mod_ref[], e))))
     end
     n
 end
+bench(macroexpand_block, macroexpand_block_setup; reset = (ex, mod_ref) -> (mod_ref[] = fresh_module()))
 
 # Inference and optimization of every entry point of a freshly defined workload
 const SIGS = [
@@ -142,13 +149,16 @@ const SIGS = [
     (:closures_and_generators, Tuple{Vector{Float64}}), (:try_paths, Tuple{Vector{Any}}),
     (:grid_sum, Tuple{Any}), (:run_all, Tuple{}),
 ]
-bench("infer"; setup = () -> Ref{Module}(), reset = mref -> (mref[] = load(SRC)), seconds = 1.0) do mref
+# The Ref holds the freshly loaded workload, which reset reloads: infer_workload(Ref(load(SRC)))
+infer_workload_setup() = Ref{Module}()
+function infer_workload(workload_ref)
     n = 0
     for (name, sig) in SIGS
-        n += length(Base.invokelatest(code_typed, latest(mref[], name), sig))
+        n += length(Base.invokelatest(code_typed, latest(workload_ref[], name), sig))
     end
     n
 end
+bench(infer_workload, infer_workload_setup; reset = workload_ref -> (workload_ref[] = load(SRC)), seconds = 1.0)
 
 # Base's generic code inferred anew for a type that did not exist before: show, sort,
 # broadcast, Dict, iteration. This is most of what a package's first use costs.
@@ -172,24 +182,26 @@ function exercise(v::Vector{Item})
     return length(d), sum(ws), sum(x -> x.id, Iterators.filter(x -> x.tag === :a, v)), position(io)
 end
 """
-bench("infer_base_new_type"; setup = () -> Ref{Module}(), reset = mref -> (mref[] = load(NEWTYPE_SRC)), seconds = 1.0) do mref
-    m = mref[]
+infer_base_new_type_setup() = Ref{Module}()
+function infer_base_new_type(workload_ref)
+    m = workload_ref[]
     T = latest(m, :Item)
     length(Base.invokelatest(code_typed, latest(m, :exercise), Tuple{Vector{T}}))
 end
+bench(infer_base_new_type, infer_base_new_type_setup; reset = workload_ref -> (workload_ref[] = load(NEWTYPE_SRC)), seconds = 1.0)
 
 # The first call of the workload: inference, optimization, LLVM and the JIT
-bench("first_call"; setup = () -> Ref{Module}(), reset = mref -> (mref[] = load(SRC)), seconds = 1.0) do mref
-    length(Base.invokelatest(latest(mref[], :run_all)))
-end
+first_call_setup() = Ref{Module}()
+first_call(workload_ref) = length(Base.invokelatest(latest(workload_ref[], :run_all)))
+bench(first_call, first_call_setup; reset = workload_ref -> (workload_ref[] = load(SRC)), seconds = 1.0)
 
-bench("lower_large_function"; setup = () -> (Meta.parse(BIG_SRC), Ref{Module}()), reset = st -> (st[2][] = fresh_module())) do (ex, mref)
-    length(string(typeof(Meta.lower(mref[], ex))))
-end
+lower_large_function_setup() = (Meta.parse(BIG_SRC), Ref{Module}())
+lower_large_function(ex, mod_ref) = length(string(typeof(Meta.lower(mod_ref[], ex))))
+bench(lower_large_function, lower_large_function_setup; reset = (ex, mod_ref) -> (mod_ref[] = fresh_module()))
 
-bench("llvm_large_function"; setup = () -> Ref{Module}(), reset = mref -> (mref[] = load(BIG_SRC)), seconds = 1.0) do mref
-    Base.invokelatest(latest(mref[], :big), 1.5, 2.5, 150)
-end
+llvm_large_function_setup() = Ref{Module}()
+llvm_large_function(workload_ref) = Base.invokelatest(latest(workload_ref[], :big), 1.5, 2.5, 150)
+bench(llvm_large_function, llvm_large_function_setup; reset = workload_ref -> (workload_ref[] = load(BIG_SRC)), seconds = 1.0)
 
 # Inserting a method that 400 compiled callers depend on: method table insertion,
 # backedge traversal and invalidation
@@ -205,10 +217,12 @@ function prepare_invalidate()
     end
     return m
 end
-bench("method_invalidate"; setup = () -> Ref{Module}(), reset = mref -> (mref[] = prepare_invalidate()), seconds = 1.0) do mref
-    m = mref[]
+method_invalidate_setup() = Ref{Module}()
+function method_invalidate(workload_ref)
+    m = workload_ref[]
     Core.eval(m, :(g(::Thing) = 2))
     m
 end
+bench(method_invalidate, method_invalidate_setup; reset = workload_ref -> (workload_ref[] = prepare_invalidate()), seconds = 1.0)
 
 end

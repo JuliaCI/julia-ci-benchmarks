@@ -5,6 +5,11 @@ using ..Driver
 
 # Seven-point stencil over CartesianIndices, with bounds checks left in for the
 # compiler to prove away
+function stencil_3d_cartesian_setup()
+    out, u = carve(Float64, 64^3, 2)
+    u .= rand_f64(SplitMix(1), 64^3)
+    return reshape(out, 64, 64, 64), reshape(u, 64, 64, 64)
+end
 function stencil!(out, u)
     R = CartesianIndices(u)
     I1, Il = first(R), last(R)
@@ -14,16 +19,17 @@ function stencil!(out, u)
     end
     return out
 end
-function stencil_input()
-    buf, (out, u) = carve(Float64, 64^3, 2)
-    u .= rand_f64(SplitMix(1), 64^3)
-    return buf, reshape(out, 64, 64, 64), reshape(u, 64, 64, 64)
-end
-bench("stencil_3d_cartesian"; ops = 62^3, setup = stencil_input) do (_, out, u)
-    stencil!(out, u)
-end
+stencil_3d_cartesian(out, u) = stencil!(out, u)
+bench(stencil_3d_cartesian, stencil_3d_cartesian_setup; ops = 62^3)
 
 # Hand-written matmul in i-k-j order: LICM, the inner loop vectorized
+function matmul_loops_setup()
+    r = SplitMix(2)
+    c, a, b = carve(Float64, 96^2, 3)
+    a .= rand_f64(r, 96^2)
+    b .= rand_f64(r, 96^2)
+    return reshape(c, 96, 96), reshape(a, 96, 96), reshape(b, 96, 96)
+end
 function matmul!(C, A, B)
     fill!(C, 0)
     n, m = size(A)
@@ -36,24 +42,17 @@ function matmul!(C, A, B)
     end
     return C
 end
-function matmul_input()
-    r = SplitMix(2)
-    buf, (c, a, b) = carve(Float64, 96^2, 3)
-    a .= rand_f64(r, 96^2)
-    b .= rand_f64(r, 96^2)
-    return buf, reshape(c, 96, 96), reshape(a, 96, 96), reshape(b, 96, 96)
-end
-bench("matmul_loops"; ops = 96^3, setup = matmul_input) do (_, C, A, B)
-    matmul!(C, A, B)
-end
+matmul_loops(C, A, B) = matmul!(C, A, B)
+bench(matmul_loops, matmul_loops_setup; ops = 96^3)
 
 # Non-contiguous views: SubArray index computation with a stride and a column range
-bench("view_strided_sum"; ops = 1024 * 512, setup = () -> reshape(rand_f64(SplitMix(3), 2048 * 1024), 2048, 1024)) do A
-    sum(view(A, 1:2:2048, 257:768)) + sum(view(A, 3, :))
-end
+view_strided_sum_setup() = reshape(rand_f64(SplitMix(3), 2048 * 1024), 2048, 1024)
+view_strided_sum(A) = sum(view(A, 1:2:2048, 257:768)) + sum(view(A, 3, :))
+bench(view_strided_sum, view_strided_sum_setup; ops = 1024 * 512)
 
 # ReinterpretArray, historically a performance trap
-bench("reinterpret_sum"; ops = 2^18, setup = () -> rand_f32(SplitMix(4), 2^18)) do x
+reinterpret_sum_setup() = rand_f32(SplitMix(4), 2^18)
+function reinterpret_sum(x)
     s = UInt32(0)
     for v in reinterpret(UInt32, x)
         s += v >> 3
@@ -64,20 +63,20 @@ bench("reinterpret_sum"; ops = 2^18, setup = () -> rand_f32(SplitMix(4), 2^18)) 
     end
     s, t
 end
+bench(reinterpret_sum, reinterpret_sum_setup; ops = 2^18)
 
-function permute_input()
+function permutedims_3d_setup()
     n = 128 * 64 * 32
-    buf, (a, b) = carve(Float64, n, 2)
+    a, b = carve(Float64, n, 2)
     a .= rand_f64(SplitMix(5), n)
-    return buf, reshape(a, 128, 64, 32), reshape(b, 32, 128, 64)
+    return reshape(a, 128, 64, 32), reshape(b, 32, 128, 64)
 end
-bench("permutedims_3d"; ops = 128 * 64 * 32, setup = permute_input) do (_, A, B)
-    permutedims!(B, A, (3, 1, 2))
-end
+permutedims_3d(A, B) = permutedims!(B, A, (3, 1, 2))
+bench(permutedims_3d, permutedims_3d_setup; ops = 128 * 64 * 32)
 
 # Growth through push!, i.e. Memory reallocation and the growend path. Reallocation
 # goes through the system allocator and page faults, hence the wider tolerance.
-bench("push_grow"; ops = 2^18, tolerance = 0.1) do _
+function push_grow()
     v = Int[]
     for i in 1:2^18
         push!(v, i)
@@ -89,61 +88,62 @@ bench("push_grow"; ops = 2^18, tolerance = 0.1) do _
     end
     v, w
 end
+bench(push_grow; ops = 2^18, tolerance = 0.1)
 
 # The input is restored before every sample: (data, pristine copy)
-bench("sort_f64"; ops = 2^18, setup = () -> (x = rand_f64(SplitMix(6), 2^18); (copy(x), x)),
-      reset = ((v, x),) -> copyto!(v, x)) do (v, _)
-    sort!(v)
-end
+sort_f64_setup() = (x = rand_f64(SplitMix(6), 2^18); (copy(x), x))
+sort_f64(v, x) = sort!(v)
+bench(sort_f64, sort_f64_setup; ops = 2^18, reset = (v, x) -> copyto!(v, x))
 
 # Integers with a small range take the counting/radix paths
-bench("sort_int"; ops = 2^18, setup = () -> (x = rand_int(SplitMix(7), 2^18, -10^6, 10^6); (copy(x), x)),
-      reset = ((v, x),) -> copyto!(v, x)) do (v, _)
-    sort!(v)
-end
+sort_int_setup() = (x = rand_int(SplitMix(7), 2^18, -10^6, 10^6); (copy(x), x))
+sort_int(v, x) = sort!(v)
+bench(sort_int, sort_int_setup; ops = 2^18, reset = (v, x) -> copyto!(v, x))
 
 # A by= transform over tuples: comparator inlining through the sort machinery
-function sortby_input()
+function sort_by_tuple_setup()
     r = SplitMix(8)
-    return collect(zip(rand_int(r, 2^16, 1, 1000), rand_f64(r, 2^16)))
+    x = collect(zip(rand_int(r, 2^16, 1, 1000), rand_f64(r, 2^16)))
+    return copy(x), x
 end
-bench("sort_by_tuple"; ops = 2^16, setup = () -> (x = sortby_input(); (copy(x), x)),
-      reset = ((v, x),) -> copyto!(v, x)) do (v, _)
-    sort!(v; by = last, rev = true)
-end
+sort_by_tuple(v, x) = sort!(v; by = last, rev = true)
+bench(sort_by_tuple, sort_by_tuple_setup; ops = 2^16, reset = (v, x) -> copyto!(v, x))
 
 # Random queries keep the binary search's branches unpredictable
-function search_input()
+function searchsorted_random_setup()
     r = SplitMix(9)
     return sort!(rand_f64(r, 2^20)), rand_f64(r, 2^14)
 end
-bench("searchsorted"; ops = 2^14, setup = search_input) do (hay, q)
+function searchsorted_random(hay, q)
     s = 0
     for x in q
         s += searchsortedfirst(hay, x)
     end
     s
 end
+bench(searchsorted_random, searchsorted_random_setup; ops = 2^14)
 
-function bits_input()
+function bitarray_ops_setup()
     r = SplitMix(10)
     return BitVector(isodd.(rand_int(r, 2^20, 0, 1))), BitVector(isodd.(rand_int(r, 2^20, 0, 1)))
 end
-bench("bitarray_ops"; ops = 2^20, setup = bits_input) do (a, b)
+function bitarray_ops(a, b)
     c = a .& .!b
     count(c) + count(a .⊻ b) + length(findall(c))
 end
+bench(bitarray_ops, bitarray_ops_setup; ops = 2^20)
 
 # Concatenation of many pieces, including splatting a runtime-length vector
-function cat_input()
+function cat_splat_setup()
     r = SplitMix(11)
     return [rand_f64(r, 64) for _ in 1:1024]
 end
-bench("cat_splat"; ops = 1024, setup = cat_input) do vs
+function cat_splat(vs)
     a = reduce(vcat, vs)
     b = hcat(vs...)
     c = vcat(vs...)
     length(a) + size(b, 2) + length(c)
 end
+bench(cat_splat, cat_splat_setup; ops = 1024)
 
 end
