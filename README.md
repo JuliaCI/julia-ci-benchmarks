@@ -149,7 +149,10 @@ per-sample reset with a fixed evaluation count, and a record format the comparis
 It also writes `results-meta.json`: the builds (version, commit, LLVM, CPU target), the
 machine, the settings, the suite commit, Buildkite variables and any failed processes.
 `compare.jl` adds `report.md` and, for two arms, `compare.json` with the per-benchmark and
-per-category verdicts.
+per-category verdicts. It exits with 1 on a regression, 3 on improvements only, and 2 when
+a benchmark raised an error or a process failed (with one arm too); the report lists such
+benchmarks, and any with missing blocks, under "Incomplete". A benchmark whose records
+mix cycles and time (counters missing on one arm) is judged on time.
 
 ## Defining a benchmark
 

@@ -3,13 +3,21 @@
 #   julia compare.jl RESULTS_DIR [--base=base] [--head=head] [--perf-url=URL]
 #
 # With two arms, compares head against base and writes RESULTS_DIR/report.md and
-# RESULTS_DIR/compare.json. Exit code: 0 no differences, 3 improvements only,
-# 1 regressions. With one arm, writes a summary report and exits 0.
+# RESULTS_DIR/compare.json. With one arm, writes a summary report. Exit code:
+#   0  no differences (with one arm: a complete run)
+#   3  improvements only
+#   1  regressions, whether or not the run is complete
+#   2  incomplete, no regressions: a benchmark raised an error or a process failed
+# The report lists every incomplete benchmark under "Incomplete", including those with
+# missing blocks or blocks that differ between arms; a skipped benchmark (`min_threads`)
+# is not incomplete.
 #
 # Per benchmark, arm and block the value is the minimum over samples of the benchmark's
-# metric: cycles of the calling thread, or wall time for work that leaves it. A change is
-# reported only when it is robust: every block's ratio exceeds the tolerance, the
-# head and base values do not overlap at all, and the difference clears an absolute floor.
+# metric: cycles of the calling thread, or wall time for work that leaves it. A benchmark
+# whose records disagree on the unit (counters missing on some arm or block) is judged on
+# time throughout. A change is reported only when it is robust: every block's ratio
+# exceeds the tolerance, the head and base values do not overlap at all, and the
+# difference clears an absolute floor.
 # Instruction counts are exact from process to process, so a change in them is reported
 # separately: the generated code or the work done changed, whether or not it is slower.
 include(joinpath(@__DIR__, "driver", "json.jl"))
@@ -40,31 +48,73 @@ function metric_of(r)
     m == "cycles" && haskey(r["counters"], "cycles") ? "cycles" : "time"
 end
 
-function cell(r)
-    m = metric_of(r)
+function cell(r, m)
     c = r["counters"]
     v = m == "cycles" ? minimum(c["cycles"]) : r["min_ns"]
     ins = haskey(c, "instructions") ? Float64(minimum(c["instructions"])) : nothing
     return Cell(v, r["min_ns"], ins, r["allocs"], r["bytes"])
 end
 
-# cells[name][arm][block] => Cell
+# cells[name][arm][block] => Cell. A benchmark is judged in one unit: when its records
+# disagree (cycles on one arm or block, time on another), time for all of them.
 function collect_cells(recs)
+    units = Dict{String,Set{String}}()
+    for r in recs
+        r["status"] == "ok" && push!(get!(Set{String}, units, r["name"]), metric_of(r))
+    end
     cells = Dict{String,Dict{String,Dict{Int,Cell}}}()
     info = Dict{String,Any}()
     errors = Dict{String,Dict{String,String}}()
+    skipped = Dict{String,Dict{String,String}}()
     for r in recs
         name, arm = r["name"], r["arm"]
         if r["status"] != "ok"
-            get!(Dict{String,String}, errors, name)[arm] = r["status"] == "skipped" ? "skipped: $(r["error"])" : something(r["error"], "error")
+            get!(Dict{String,String}, r["status"] == "skipped" ? skipped : errors, name)[arm] = something(r["error"], r["status"])
             continue
         end
+        m = length(units[name]) == 1 ? only(units[name]) : "time"
         get!(() -> Dict{String,Dict{Int,Cell}}(), cells, name)
-        get!(Dict{Int,Cell}, cells[name], arm)[r["block"]] = cell(r)
-        info[name] = (; category = r["category"], metric = metric_of(r), ops = r["ops"],
-                      tolerance = something(r["tolerance"], DEFAULT_TOL[metric_of(r)]))
+        get!(Dict{Int,Cell}, cells[name], arm)[r["block"]] = cell(r, m)
+        info[name] = (; category = r["category"], metric = m, ops = r["ops"], mixed_units = length(units[name]) > 1,
+                      tolerance = something(r["tolerance"], DEFAULT_TOL[m]))
     end
-    return cells, info, errors
+    return cells, info, errors, skipped
+end
+
+# Benchmarks whose comparison rests on less than the run promised: an error on some arm,
+# or blocks that differ between arms or fall short of the blocks run. Blocks lost with a
+# failed process are reported once, as that process.
+function incompleteness(cells, errors, meta, arms)
+    nblocks = meta["settings"]["blocks"]
+    failed = Set((f["category"], f["arm"], f["block"]) for f in meta["failures"])
+    out = Dict{String,Vector{String}}()
+    for (name, by_arm) in errors, (arm, err) in by_arm
+        push!(get!(Vector{String}, out, name), "error on `$arm`: $(first(split(err, '\n')))")
+    end
+    for (name, by_arm) in cells
+        got = Dict(a => sort!(collect(keys(get(by_arm, a, Dict{Int,Cell}())))) for a in arms)
+        all(a -> got[a] == 1:nblocks, arms) && continue
+        cat = first(split(name, '/'))
+        lost = [(a, k) for a in arms for k in 1:nblocks if !(k in got[a])]
+        haskey(errors, name) || all(((a, k),) -> (cat, a, k) in failed, lost) && continue
+        push!(get!(Vector{String}, out, name), "blocks " * join(("`$a` $(got[a])" for a in arms), ", ") * " of $nblocks")
+    end
+    return out
+end
+
+function incomplete_report(io, incomplete, skipped, meta)
+    if !isempty(incomplete) || !isempty(meta["failures"])
+        println(io, "\n#### Incomplete\n")
+        for f in meta["failures"]
+            println(io, "- process for `$(f["category"])` on `$(f["arm"])`, block $(f["block"]) failed: $(f["error"])")
+        end
+        for (name, why) in sort!(collect(incomplete))
+            println(io, "- `$name`: ", join(why, "; "))
+        end
+    end
+    if !isempty(skipped)
+        println(io, "\nSkipped: ", join(("`$name` ($(first(values(by_arm))))" for (name, by_arm) in sort!(collect(skipped))), ", "))
+    end
 end
 
 fmt_time(t) = t < 1e3 ? @sprintf("%.0f ns", t) : t < 1e6 ? @sprintf("%.1f µs", t / 1e3) :
@@ -108,7 +158,7 @@ function judge(cells, info, base, head)
                         all(k -> abs(hi[k] / bi[k] - 1) > INSTR_TOL, eachindex(blocks))
         ab = minimum(arms[base][k].allocs for k in blocks)
         ah = minimum(arms[head][k].allocs for k in blocks)
-        push!(rows, (; name, category = inf.category, metric = inf.metric, tolerance = tol, verdict,
+        push!(rows, (; name, category = inf.category, metric = inf.metric, mixed_units = inf.mixed_units, tolerance = tol, verdict,
                      base = minimum(b), head = minimum(h), ratio = minimum(h) / minimum(b), ratios,
                      base_time = minimum(arms[base][k].time for k in blocks),
                      head_time = minimum(arms[head][k].time for k in blocks),
@@ -132,13 +182,14 @@ end
 
 arm_line(meta, a) = (i = meta["arms"][a]; "`$a`: julia $(i["version"]) `$(first(i["commit"], 10))` (LLVM $(i["llvm"]))")
 
-function compare_report(io, rows, suites, errors, meta, base, head, perf_url)
+function compare_report(io, rows, suites, incomplete, skipped, meta, base, head, perf_url)
     nreg = count(r -> r.verdict == "regression", rows)
     nimp = count(r -> r.verdict == "improvement", rows)
-    ninstr = count(r -> r.instr_changed, rows)
     sreg = count(s -> s.verdict == "regression", suites)
-    icon = nreg + sreg > 0 ? "🔴" : nimp > 0 ? "🟢" : "⚪"
-    println(io, "### $icon Runtime benchmarks: $nreg regressions, $nimp improvements")
+    ninc = length(incomplete) + length(meta["failures"])
+    icon = nreg + sreg > 0 ? "🔴" : ninc > 0 ? "⚠️" : nimp > 0 ? "🟢" : "⚪"
+    println(io, "### $icon Runtime benchmarks: $nreg regressions, $nimp improvements",
+            ninc > 0 ? ", incomplete (see below)" : "")
     println(io)
     println(io, "$(length(rows)) benchmarks · $(arm_line(meta, base)) → $(arm_line(meta, head)) · ",
             "$(meta["settings"]["blocks"]) blocks · $(meta["machine"]["cpu"])")
@@ -171,6 +222,11 @@ function compare_report(io, rows, suites, errors, meta, base, head, perf_url)
         end
         println(io, "\n</details>\n")
     end
+    mixed = filter(r -> r.mixed_units, rows)
+    if !isempty(mixed)
+        println(io, "Judged on time because cycles were missing on some arm or block: ",
+                join(("`$(r.name)`" for r in mixed), ", "), "\n")
+    end
     println(io, "<details><summary>All benchmarks</summary>\n")
     println(io, "| Benchmark | Metric | Base | Head | Change | Per block | Instr. | Time (head) | Allocs |")
     println(io, "|:--|:--|--:|--:|--:|:--|--:|--:|--:|")
@@ -186,20 +242,12 @@ function compare_report(io, rows, suites, errors, meta, base, head, perf_url)
         println(io, "| $(s.category) | $(fmt_pct(s.geomean)) | $(join(fmt_pct.(s.per_block), " ")) |")
     end
     println(io, "\n</details>")
-    if !isempty(errors) || !isempty(meta["failures"])
-        println(io, "\n**Failures**\n")
-        for (name, by_arm) in sort!(collect(errors)), (arm, err) in by_arm
-            println(io, "- `$name` on `$arm`: ", first(split(err, '\n')))
-        end
-        for f in meta["failures"]
-            println(io, "- process for `$(f["category"])` on `$(f["arm"])`, block $(f["block"]): $(f["error"])")
-        end
-    end
+    incomplete_report(io, incomplete, skipped, meta)
     println(io, "\n<sub>A change counts when every block agrees beyond the tolerance (cycles 3%, time 6% unless the benchmark sets its own) ",
             "and the arms do not overlap. Instruction counts are exact across processes; a change there means the code or work changed.</sub>")
 end
 
-function summary_report(io, cells, info, errors, meta, arm)
+function summary_report(io, cells, info, incomplete, skipped, meta, arm)
     i = meta["arms"][arm]
     println(io, "### Runtime benchmarks: julia $(i["version"]) `$(first(i["commit"], 10))`")
     println(io)
@@ -217,12 +265,7 @@ function summary_report(io, cells, info, errors, meta, arm)
         println(io, "| `$name` | $(fmt_time(t)) | $(fmt_time(t / info[name].ops)) | ",
                 "$(cyc === nothing ? "" : fmt_count(cyc)) | $(ins === nothing ? "" : fmt_count(ins)) | $ipc | $(cs[1].allocs) |")
     end
-    if !isempty(errors)
-        println(io, "\n**Failures**\n")
-        for (name, by_arm) in sort!(collect(errors)), (a, err) in by_arm
-            println(io, "- `$name` on `$a`: ", first(split(err, '\n')))
-        end
-    end
+    incomplete_report(io, incomplete, skipped, meta)
 end
 
 function main(args)
@@ -242,22 +285,26 @@ function main(args)
     end
     dir === nothing && error("usage: julia compare.jl RESULTS_DIR [--base=NAME] [--head=NAME]")
     recs, meta = load(dir)
-    cells, info, errors = collect_cells(recs)
+    cells, info, errors, skipped = collect_cells(recs)
     arms = meta["arm_order"]
+    # Errors and failed processes make the run incomplete; a regression still takes precedence
+    broken = !isempty(errors) || !isempty(meta["failures"])
     if length(arms) == 1
-        open(io -> summary_report(io, cells, info, errors, meta, arms[1]), joinpath(dir, "report.md"), "w")
-        return 0
+        incomplete = incompleteness(cells, errors, meta, arms)
+        open(io -> summary_report(io, cells, info, incomplete, skipped, meta, arms[1]), joinpath(dir, "report.md"), "w")
+        return broken ? 2 : 0
     end
+    incomplete = incompleteness(cells, errors, meta, [base, head])
     rows = judge(cells, info, base, head)
     suites = suite_verdicts(rows)
-    open(io -> compare_report(io, rows, suites, errors, meta, base, head, perf_url), joinpath(dir, "report.md"), "w")
+    open(io -> compare_report(io, rows, suites, incomplete, skipped, meta, base, head, perf_url), joinpath(dir, "report.md"), "w")
     tojson(r) = Dict{String,Any}(string(k) => v for (k, v) in pairs(r))
     write(joinpath(dir, "compare.json"), json_write(Dict(
         "base" => base, "head" => head, "benchmarks" => tojson.(rows), "categories" => tojson.(suites),
-        "errors" => errors, "failures" => meta["failures"])))
+        "errors" => errors, "skipped" => skipped, "incomplete" => incomplete, "failures" => meta["failures"])))
     nreg = count(r -> r.verdict == "regression", rows) + count(s -> s.verdict == "regression", suites)
     nimp = count(r -> r.verdict == "improvement", rows)
-    return nreg > 0 ? 1 : nimp > 0 ? 3 : 0
+    return nreg > 0 ? 1 : broken ? 2 : nimp > 0 ? 3 : 0
 end
 
 exit(main(ARGS))
