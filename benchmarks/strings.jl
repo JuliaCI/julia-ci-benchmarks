@@ -90,9 +90,21 @@ function regex_captures(lines)
 end
 bench(regex_captures, regex_captures_setup; ops = 4096)
 
-# Non-ASCII text: character iteration, classification and case mapping (utf8proc)
-const TEXT = repeat("Größenwahn naïve café Ωμέγα 日本語のテキスト emoji 🎉 and plain ASCII words. ", 400)
-unicode_iterate_setup() = TEXT
+# Non-ASCII text: character iteration, classification and case mapping (utf8proc). Words
+# from ASCII, Latin-1, Greek, CJK and emoji, so 1- to 4-byte characters interleave.
+function unicode_iterate_setup()
+    r = SplitMix(7)
+    plain = collect("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.,")
+    alphabets = (plain, plain, collect("àáâäçèéêëìíîïñòóôöùúûüÿßÀÉÖÜ"), collect("αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΣΩ"),
+                 collect("日本語中文字漢テキストのをは書読"), collect("🎉😀🚀🌍✨🐍🍕🎵"))
+    cs = Char[]
+    while length(cs) < 2^15
+        a = alphabets[rand_int(r, 1, 1, 6)[1]]
+        append!(cs, a[rand_int(r, rand_int(r, 1, 1, 10)[1], 1, length(a))])
+        push!(cs, ' ')
+    end
+    return String(cs[1:2^15])
+end
 function unicode_iterate(s)
     n = 0
     for c in s
@@ -100,7 +112,7 @@ function unicode_iterate(s)
     end
     n + length(uppercase(s)) + length(s)
 end
-bench(unicode_iterate, unicode_iterate_setup; ops = length(TEXT))
+bench(unicode_iterate, unicode_iterate_setup; ops = 2^15)
 
 replace_search_setup() = join(log_input(), '\n')
 function replace_search(s)

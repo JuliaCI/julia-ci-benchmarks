@@ -43,16 +43,24 @@ function threads_static_sum(x, part)
 end
 bench(threads_static_sum, threads_static_sum_setup; ops = 2^22, min_threads = 4, metric = "time", tolerance = 0.2)
 
-# Imbalanced iterations under the dynamic schedule
-threads_dynamic_imbalanced_setup() = zeros(4096)
-work(i) = (s = 0.0; for k in 1:(50 * (1 + i % 17)); s += sqrt(k + i); end; s)
+# Imbalanced iterations: the first eighth costs 30x the rest, so equal contiguous chunks
+# leave one thread with most of the work. `:dynamic` still splits the range into one chunk
+# per thread; only `:greedy` (1.11+) hands out iterations as threads free up.
+threads_dynamic_imbalanced_setup() = zeros(128)
+work(i) = (s = 0.0; for k in 1:(i <= 16 ? 300_000 : 10_000); s += sqrt(k + i); end; s)
 function threads_dynamic_imbalanced(out)
-    Threads.@threads :dynamic for i in 1:4096
-        @inbounds out[i] = work(i)
+    @static if VERSION >= v"1.11"
+        Threads.@threads :greedy for i in 1:128
+            @inbounds out[i] = work(i)
+        end
+    else
+        Threads.@threads :dynamic for i in 1:128
+            @inbounds out[i] = work(i)
+        end
     end
     out
 end
-bench(threads_dynamic_imbalanced, threads_dynamic_imbalanced_setup; ops = 4096, min_threads = 4, metric = "time", tolerance = 0.15)
+bench(threads_dynamic_imbalanced, threads_dynamic_imbalanced_setup; ops = 128, min_threads = 4, metric = "time", tolerance = 0.15)
 
 # Unbuffered channel: every put! waits for a take! on another thread
 function channel_pingpong()
@@ -148,23 +156,22 @@ function alloc_threads(keeps)
 end
 bench(alloc_threads, alloc_threads_setup; ops = 4 * 2^16, min_threads = 4, metric = "time", tolerance = 0.15)
 
-# Parallel marking of a large heap
-mutable struct ListNode
-    val::Int
-    next::Union{ListNode,Nothing}
+# Parallel marking of a large heap: 64 trees of 8191 nodes, ~1.5 million objects, broad
+# enough that the GC threads can split the work between them
+mutable struct ForestNode
+    l::Union{ForestNode,Nothing}
+    r::Union{ForestNode,Nothing}
     payload::Vector{Int}
 end
+grow(d) = ForestNode(d == 0 ? nothing : grow(d - 1), d == 0 ? nothing : grow(d - 1), Int[d])
 function full_gc_parallel_mark_setup()
-    head = nothing
-    for i in 1:500_000
-        head = ListNode(i, head, Int[i])
-    end
+    roots = Any[grow(12) for _ in 1:64]
     GC.gc(true)
-    return Ref{Any}(head)
+    return roots
 end
-function full_gc_parallel_mark(h)
+function full_gc_parallel_mark(roots)
     GC.gc(true)
-    h
+    roots
 end
 bench(full_gc_parallel_mark, full_gc_parallel_mark_setup; seconds = 1.0, min_threads = 4, metric = "time", tolerance = 0.15)
 

@@ -46,11 +46,11 @@ function serialize_roundtrip(recs)
     io = IOBuffer()
     serialize(io, recs)
     seekstart(io)
-    return length(deserialize(io))
+    return deserialize(io)
 end
 bench(serialize_roundtrip, serialize_roundtrip_setup; ops = 512)
 
-# 4 MiB written and read back in 64 KiB chunks
+# 4 MiB written and read back in 64 KiB chunks, then deleted
 function file_roundtrip_setup()
     path = tempname()
     return path, UInt8.(rand_int(SplitMix(4), 2^16, 0, 255))
@@ -69,6 +69,7 @@ function file_roundtrip(path, chunk)
             n += buf[1]
         end
     end
+    rm(path; force = true)
     return n
 end
 bench(file_roundtrip, file_roundtrip_setup; ops = 64, tolerance = 0.15)

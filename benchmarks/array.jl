@@ -142,7 +142,7 @@ function cat_splat(vs)
     a = reduce(vcat, vs)
     b = hcat(vs...)
     c = vcat(vs...)
-    length(a) + size(b, 2) + length(c)
+    return a, b, c
 end
 bench(cat_splat, cat_splat_setup; ops = 1024)
 

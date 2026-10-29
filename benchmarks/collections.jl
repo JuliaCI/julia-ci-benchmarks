@@ -21,11 +21,12 @@ function dict_int(ks, qs)
 end
 bench(dict_int, dict_int_setup; ops = 2^17)
 
-# Word counting: string hashing and comparison
+# Word counting: string hashing and comparison. Every occurrence is its own String, so
+# isequal compares contents rather than taking the identity fast path.
 function dict_string_count_setup()
     r = SplitMix(2)
     vocab = [String([Char('a' + Int(Driver.next!(r) % 26)) for _ in 1:rand_int(r, 1, 3, 12)[1]]) for _ in 1:4096]
-    return vocab[rand_int(r, 2^16, 1, 4096)]
+    return [String(Vector{UInt8}(vocab[i])) for i in rand_int(r, 2^16, 1, 4096)]
 end
 function dict_string_count(words)
     d = Dict{String,Int}()
@@ -95,13 +96,14 @@ end
 bench(iterator_compose, iterator_compose_setup; ops = 2^18)
 
 # Tuples past the inference and inlining limits (length > 32): splats, maps and
-# reductions over long heterogeneous and homogeneous tuples
+# reductions over long heterogeneous and homogeneous tuples, new ones every iteration
 long_tuples_setup() = (ntuple(i -> Float64(i), 40), ntuple(i -> isodd(i) ? i : Float64(i), 36))
 function long_tuples(t, h)
     s = 0.0
     for k in 1:1000
         u = map(x -> x * k, t)
-        s += +(u...) + sum(h) + max(t...)
+        v = map(x -> x * k, h)
+        s += +(u...) + sum(v) + max(u...)
     end
     s
 end

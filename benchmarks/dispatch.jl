@@ -71,14 +71,15 @@ bench(boxed_closure, boxed_closure_setup; ops = 2^16)
 
 # Keyword calls with runtime keyword sets: kwcall, NamedTuple merging, the kwsorter
 function kwcall_dynamic_setup()
+    r = SplitMix(5)
     kws = Any[(; scale = 2.0), (; shift = 1.0), (; scale = 0.5, flip = true), (;), (; flip = false, shift = -1.0)]
-    return rand_f64(SplitMix(5), 2^14), kws
+    return rand_f64(r, 2^14), kws, rand_int(r, 2^14, 1, 5)
 end
 kwf(x; scale = 1.0, shift = 0.0, flip::Bool = false) = (flip ? -x : x) * scale + shift
-function kwcall_dynamic(xs, kws)
+function kwcall_dynamic(xs, kws, which)
     s = 0.0
-    for (i, x) in enumerate(xs)
-        s += kwf(x; kws[1 + i % length(kws)]...)
+    for i in eachindex(xs, which)
+        s += kwf(xs[i]; kws[which[i]]...)
     end
     return s
 end
@@ -87,7 +88,7 @@ bench(kwcall_dynamic, kwcall_dynamic_setup; ops = 2^14)
 # Splatting runtime-length collections goes through Core._apply_iterate
 function splat_dynamic_setup()
     r = SplitMix(6)
-    return [rand_f64(r, 1 + i % 7) for i in 1:2^13]
+    return [rand_f64(r, n) for n in rand_int(r, 2^13, 1, 8)]
 end
 function splat_dynamic(vs)
     s = 0.0

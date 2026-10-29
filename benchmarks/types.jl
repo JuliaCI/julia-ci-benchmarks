@@ -64,16 +64,18 @@ function method_lookup_setup()
     r = SplitMix(4)
     fs = Any[+, *, getindex, convert, show, length, iterate, ==]
     args = Any[Int, Float64, Vector{Int}, String, Any, Missing, Dict{Int,Int}, Tuple{Int,Int}]
-    return [(fs[i], Tuple{args[j], args[k]}) for (i, j, k) in zip(rand_int(r, 256, 1, 8), rand_int(r, 256, 1, 8), rand_int(r, 256, 1, 8))]
+    return [(fs[i], Tuple{args[j], args[k]}) for (i, j, k) in zip(rand_int(r, 1536, 1, 8), rand_int(r, 1536, 1, 8), rand_int(r, 1536, 1, 8))]
 end
 function method_lookup(qs)
     n = 0
     for (f, tt) in qs
-        n += hasmethod(f, tt) + length(Base._methods_by_ftype(Tuple{typeof(f), tt.parameters...}, 4, Base.get_world_counter()) isa Vector ? 1 : 0)
+        ms = Base._methods_by_ftype(Tuple{typeof(f), tt.parameters...}, 4, Base.get_world_counter())
+        # Past the limit of 4 matches the lookup gives up and returns `nothing` (or `false`)
+        n += hasmethod(f, tt) + (ms isa Vector ? length(ms) : 5)
     end
     return n
 end
-bench(method_lookup, method_lookup_setup; ops = 256)
+bench(method_lookup, method_lookup_setup; ops = 1536)
 
 # Type printing, alias search included: error messages, the REPL, stack traces
 show_types_setup() = TYPES

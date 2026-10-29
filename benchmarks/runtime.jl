@@ -10,9 +10,10 @@ end
 @noinline check(x, i) = x > 0.9 ? throw(ParseFailure(i)) : x
 # End of the shared part.
 
-# Every tenth element throws: jl_throw, unwinding and the backtrace collection
-throw_catch_setup() = rand_f64(SplitMix(1), 2^11)
-function throw_catch(xs)
+# Every tenth element throws: jl_throw, unwinding and the backtrace collection. The input
+# is reshuffled before every sample, so which elements throw is unpredictable.
+throw_catch_setup() = (rand_f64(SplitMix(1), 2^11), SplitMix(101))
+function throw_catch(xs, r)
     s = 0.0
     for (i, x) in enumerate(xs)
         s += try
@@ -23,7 +24,7 @@ function throw_catch(xs)
     end
     return s
 end
-bench(throw_catch, throw_catch_setup; ops = 2^11)
+bench(throw_catch, throw_catch_setup; ops = 2^11, reset = (xs, r) -> shuffle_det!(r, xs))
 
 # try blocks that never throw, around cheap work: the cost of the handler itself
 try_nothrow_setup() = rand_f64(SplitMix(2), 2^16) .* 0.8
@@ -79,7 +80,7 @@ function deepcopy_tree_setup()
     end
     return root
 end
-deepcopy_tree(root) = length(deepcopy(root).children)
+deepcopy_tree(root) = deepcopy(root)
 bench(deepcopy_tree, deepcopy_tree_setup; ops = 2001)
 
 # Untyped and typed globals: binding lookup and world-age partitions on every access

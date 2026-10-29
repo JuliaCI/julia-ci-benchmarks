@@ -39,7 +39,9 @@ function large_function_src()
             println(io, "    v$i = $va + (n % $(i % 11 + 2)) * $vb")
         end
     end
-    println(io, "    return v300 + v299")
+    # Every statement feeds the result, as a balanced tree of binary additions
+    sumtree(lo, hi) = lo == hi ? "v$lo" : "($(sumtree(lo, (lo + hi) ÷ 2)) + $(sumtree((lo + hi) ÷ 2 + 1, hi)))"
+    println(io, "    return ", sumtree(1, 300))
     println(io, "end")
     return String(take!(io))
 end

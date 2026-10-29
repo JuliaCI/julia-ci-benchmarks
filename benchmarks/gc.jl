@@ -12,14 +12,18 @@ struct TreeNode
 end
 make(d) = d == 0 ? TreeNode(nothing, nothing) : TreeNode(make(d - 1), make(d - 1))
 check(t::TreeNode) = 1 + (t.l === nothing ? 0 : check(t.l)) + (t.r === nothing ? 0 : check(t.r))
-function binary_trees()
+# The trees escape into a ring from setup, each replacing one built a call earlier
+binary_trees_setup() = Vector{Any}(nothing, 32)
+function binary_trees(keep)
     s = 0
-    for _ in 1:32
-        s += check(make(12))
+    for i in 1:32
+        t = make(12)
+        @inbounds keep[i] = t
+        s += check(t)
     end
     return s
 end
-bench(binary_trees; ops = 32 * 2^13, metric = "time", tolerance = 0.08)
+bench(binary_trees, binary_trees_setup; ops = 32 * 2^13, metric = "time", tolerance = 0.08)
 
 # A full collection with ~1.5 million live objects in the old generation: mark speed
 mutable struct ListNode
@@ -41,21 +45,22 @@ function full_gc_large_heap(h)
 end
 bench(full_gc_large_heap, full_gc_large_heap_setup; metric = "time", tolerance = 0.08, seconds = 1.0)
 
-# Young objects stored into an old container: write barrier and remembered set
+# Young objects stored into many old owners: the write barrier's slow path, which queues
+# each owner in the remembered set. Once remembered, an owner takes the fast path until a
+# full collection, so reset runs one before every sample.
 function write_barrier_setup()
-    v = Vector{Any}(undef, 2^16)
-    fill!(v, nothing)
+    owners = [Ref{Any}(nothing) for _ in 1:2^14]
     GC.gc(true)
-    return v
+    return owners
 end
-function write_barrier(v)
-    n = length(v)
-    for i in 1:2^18
-        @inbounds v[1 + (i * 7919) % n] = Ref(i)
+function write_barrier(owners)
+    for i in eachindex(owners)
+        @inbounds owners[i][] = Ref(i)
     end
-    return v
+    return owners
 end
-bench(write_barrier, write_barrier_setup; ops = 2^18, metric = "time", tolerance = 0.08)
+bench(write_barrier, write_barrier_setup; ops = 2^14, metric = "time", tolerance = 0.08,
+      reset = owners -> GC.gc(true), seconds = 1.0)
 
 # 1 MiB arrays allocated and dropped: the big-object path and malloc'd-memory accounting
 large_arrays_setup() = Vector{Any}(nothing, 8)

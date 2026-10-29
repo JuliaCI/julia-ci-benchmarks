@@ -94,10 +94,10 @@ per-sample reset with a fixed evaluation count, and a record format the comparis
 | `dispatch` | abstract element types, union splitting, `Any` arithmetic, boxed closures, dynamic kwcalls, dynamic splats, invokelatest | cycles |
 | `types` | subtyping, intersection, apply_type with the type cache, method lookup, type printing | cycles |
 | `runtime` | throw/catch, try without throw, egal and hash, deepcopy, global bindings, task-local storage, ScopedValues | cycles |
-| `gc` | binary trees, full GC of a large heap, write barrier, big arrays, small arrays, finalizers, BigInt | time |
+| `gc` | binary trees, full GC of a large heap, the write barrier's slow path over many old owners, big arrays, small arrays, finalizers, BigInt | time |
 | `compiler` | parsing, macro expansion, lowering (whole file, closures and keywords, a large function), inference of a workload and of Base for a new type, first call, LLVM on a large function, method invalidation | cycles |
 | `apps` | n-body, Mandelbrot, spectral norm, fannkuch, a JSON parser, a bytecode interpreter, LU with bounds checks, RK4 on tuples, BFS | cycles |
-| `parallel` (4 threads) | spawn/fetch, nested spawn, static and dynamic `@threads`, channels (ping-pong, buffered), lock and atomic contention, task switches, threaded allocation, parallel marking | time |
+| `parallel` (4 threads) | spawn/fetch, nested spawn, static `@threads`, rebalancing an imbalanced loop (`:greedy`), channels (ping-pong, buffered), lock and atomic contention, task switches, threaded allocation, parallel marking of a broad forest | time |
 
 ### What a benchmark must satisfy
 
@@ -109,6 +109,9 @@ per-sample reset with a fixed evaluation count, and a record format the comparis
 - Allocations it means to measure escape (stored into a container from `setup`). The
   compiler removes non-escaping allocations, and inlines the finalizers of non-escaping
   objects, and both have silently emptied benchmarks here.
+- It returns what it constructs (the concatenated arrays, the copy, the deserialized
+  value), not a length or a count: the driver keeps the returned value alive, but a
+  length does not keep alive the work that built the contents.
 - Inputs come from `SplitMix(seed)` inside its own `setup`, never from `rand`.
 - Kernels that stream several arrays take them from `carve(T, n, k)`: one allocation at
   fixed offsets. Separately allocated arrays land at different relative alignments in
