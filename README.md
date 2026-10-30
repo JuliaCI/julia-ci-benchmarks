@@ -17,6 +17,11 @@ julia compare.jl results            # results/report.md
 julia bench.jl --arm=base=/path/to/old/julia --arm=head=/path/to/new/julia --out=results
 julia compare.jl results            # report.md, compare.json; exit 1 on a regression
 
+# confirm regressions against a control: another build that should equal base
+julia bench.jl --arm=base=... --arm=control=/path/to/earlier/master --arm=head=... --out=confirm \
+               $(julia tools/flagged.jl results | sed -n '1s/[^ ]*/--category=&/gp;2s/.*/--filter=&/p')
+julia compare.jl confirm --control=control
+
 # try one category in this process
 julia run.jl --category=simd
 ```

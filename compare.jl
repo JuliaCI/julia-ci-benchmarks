@@ -1,6 +1,6 @@
 # Judge and report results written by bench.jl.
 #
-#   julia compare.jl RESULTS_DIR [--base=base] [--head=head] [--perf-url=URL]
+#   julia compare.jl RESULTS_DIR [--base=base] [--head=head] [--control=NAME] [--perf-url=URL]
 #
 # With two arms, compares head against base and writes RESULTS_DIR/report.md and
 # RESULTS_DIR/compare.json. With one arm, writes a summary report. Exit code:
@@ -19,6 +19,9 @@
 # time throughout. A change is reported only when it is robust: every block's ratio
 # exceeds the tolerance, the head and base values do not overlap at all, and the
 # difference clears an absolute floor.
+# With a control arm (another build that should equal base, such as the master build
+# before it), a change stands only when head also differs that way from the control: if
+# two master builds differ as much, the change is code placement, not the head commit.
 # Instruction counts are exact from process to process, so a change in them is reported
 # separately: the generated code or the work done changed, whether or not it is slower.
 # Kernels that dispatch at runtime are the exception: the call cache is keyed on the
@@ -197,9 +200,21 @@ function suite_verdicts(rows)
     return out
 end
 
+# Keep a verdict only when head differs the same way from the control arm
+function apply_control(rows, rows_c, key)
+    byname = Dict(getproperty(r, key) => r for r in rows_c)
+    out = Any[]
+    for r in rows
+        rc = get(byname, getproperty(r, key), nothing)
+        vetoed = r.verdict != "same" && (rc === nothing || rc.verdict != r.verdict)
+        push!(out, merge(r, (; verdict = vetoed ? "same" : r.verdict, vetoed, control = rc)))
+    end
+    return out
+end
+
 arm_line(meta, a) = (i = meta["arms"][a]; "`$a`: julia $(i["version"]) `$(first(i["commit"], 10))` (LLVM $(i["llvm"]))")
 
-function compare_report(io, rows, suites, incomplete, skipped, meta, base, head, perf_url)
+function compare_report(io, rows, suites, incomplete, skipped, meta, base, head, control, perf_url)
     nreg = count(r -> r.verdict == "regression", rows)
     nimp = count(r -> r.verdict == "improvement", rows)
     sreg = count(s -> s.verdict == "regression", suites)
@@ -210,6 +225,7 @@ function compare_report(io, rows, suites, incomplete, skipped, meta, base, head,
     println(io)
     println(io, "$(length(rows)) benchmarks · $(arm_line(meta, base)) → $(arm_line(meta, head)) · ",
             "$(meta["settings"]["blocks"]) blocks · $(meta["machine"]["cpu"])")
+    control === nothing || println(io, "\nControl: $(arm_line(meta, control)), another master build")
     perf_url === nothing || println(io, "\n[All measurements of this build on perf.julialang.org]($perf_url)")
     println(io)
     changed = filter(r -> r.verdict != "same", rows)
@@ -228,6 +244,21 @@ function compare_report(io, rows, suites, incomplete, skipped, meta, base, head,
         println(io, "**Category geometric means:** ",
                 join(("$(s.verdict == "regression" ? "🔴" : "🟢") $(s.category) $(fmt_pct(s.geomean))" for s in suites if s.verdict != "same"), ", "))
         println(io)
+    end
+    vetoed = filter(r -> get(r, :vetoed, false), rows)
+    vetoed_suites = filter(s -> get(s, :vetoed, false), suites)
+    if !isempty(vetoed) || !isempty(vetoed_suites)
+        n = length(vetoed) + length(vetoed_suites)
+        println(io, "<details><summary>$n changes dropped: head is no different from the control build</summary>\n")
+        println(io, "| Benchmark | vs base | vs control |")
+        println(io, "|:--|--:|--:|")
+        for r in vetoed
+            println(io, "| `$(r.name)` | $(fmt_pct(r.ratio)) | $(r.control === nothing ? "" : fmt_pct(r.control.ratio)) |")
+        end
+        for s in vetoed_suites
+            println(io, "| $(s.category) (geomean) | $(fmt_pct(s.geomean)) | $(s.control === nothing ? "" : fmt_pct(s.control.geomean)) |")
+        end
+        println(io, "\n</details>\n")
     end
     instr = filter(r -> r.instr_changed && r.verdict == "same", rows)
     if !isempty(instr)
@@ -262,7 +293,9 @@ function compare_report(io, rows, suites, incomplete, skipped, meta, base, head,
     incomplete_report(io, incomplete, skipped, meta)
     println(io, "\n<sub>A change counts when every block agrees beyond the tolerance (cycles 3%, time 6% unless the benchmark sets its own) ",
             "and the arms do not overlap. A cycles change that instruction counts do not explain must exceed $(round(Int, 100LAYOUT_TOL))%: ",
-            "code placement alone moves cycles that much between builds. Instruction counts are exact across processes; a change there means the code or work changed.</sub>")
+            "code placement alone moves cycles that much between builds. ",
+            control === nothing ? "" : "A change must also hold against the control build. ",
+            "Instruction counts are exact across processes; a change there means the code or work changed.</sub>")
 end
 
 function summary_report(io, cells, info, incomplete, skipped, meta, arm)
@@ -290,18 +323,21 @@ function main(args)
     dir = nothing
     base, head = "base", "head"
     perf_url = nothing
+    control = nothing
     for a in args
         if startswith(a, "--base=")
             base = a[8:end]
         elseif startswith(a, "--head=")
             head = a[8:end]
+        elseif startswith(a, "--control=")
+            control = a[11:end]
         elseif startswith(a, "--perf-url=")
             perf_url = a[12:end]
         else
             dir = a
         end
     end
-    dir === nothing && error("usage: julia compare.jl RESULTS_DIR [--base=NAME] [--head=NAME]")
+    dir === nothing && error("usage: julia compare.jl RESULTS_DIR [--base=NAME] [--head=NAME] [--control=NAME]")
     recs, meta = load(dir)
     cells, info, errors, skipped = collect_cells(recs)
     arms = meta["arm_order"]
@@ -315,10 +351,16 @@ function main(args)
     incomplete = incompleteness(cells, errors, meta, [base, head])
     rows = judge(cells, info, base, head)
     suites = suite_verdicts(rows)
-    open(io -> compare_report(io, rows, suites, incomplete, skipped, meta, base, head, perf_url), joinpath(dir, "report.md"), "w")
-    tojson(r) = Dict{String,Any}(string(k) => v for (k, v) in pairs(r))
+    if control !== nothing
+        control in arms || error("no arm named $control")
+        rows_c = judge(cells, info, control, head)
+        rows = apply_control(rows, rows_c, :name)
+        suites = apply_control(suites, suite_verdicts(rows_c), :category)
+    end
+    open(io -> compare_report(io, rows, suites, incomplete, skipped, meta, base, head, control, perf_url), joinpath(dir, "report.md"), "w")
+    tojson(r) = Dict{String,Any}(string(k) => (v isa NamedTuple ? tojson(v) : v) for (k, v) in pairs(r))
     write(joinpath(dir, "compare.json"), json_write(Dict(
-        "base" => base, "head" => head, "benchmarks" => tojson.(rows), "categories" => tojson.(suites),
+        "base" => base, "head" => head, "control" => control, "benchmarks" => tojson.(rows), "categories" => tojson.(suites),
         "errors" => errors, "skipped" => skipped, "incomplete" => incomplete, "failures" => meta["failures"])))
     nreg = count(r -> r.verdict == "regression", rows) + count(s -> s.verdict == "regression", suites)
     nimp = count(r -> r.verdict == "improvement", rows)
