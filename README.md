@@ -218,13 +218,34 @@ The benchmark is named after the kernel (`simd/axpy_alias_check`). `setup()` ret
 kernel's arguments, built once, and one sample is one call `kernel(args...)`. Keywords:
 `reset` (called with the same arguments, untimed, before each sample, for kernels that
 mutate their input), `ops` (work items per call), `seconds` (sampling budget), `metric`
-(`"cycles"` or `"time"`), `tolerance` (overrides the comparison threshold), `min_threads`.
+(`"cycles"`, `"instructions"` or `"time"`), `tolerance` (overrides the comparison threshold), `min_threads`.
 
 Each benchmark is a self-contained block, its setup and helpers directly above its
 `bench` line, with literal sizes rather than file-level constants. A few files
 (`compiler`, `types`, `runtime`, `strings`) start with a part shared by several of their
 benchmarks, between `# Shared by the benchmarks below` and `# End of the shared part.`.
 `julia -t 4 tools/check_blocks.jl` checks that every block runs on its own.
+
+## Adding a benchmark
+
+CI checks out this repository's `main` at job time, so a push to `main` is measured on
+every following PR and master build. Nothing else needs registering: comparisons and
+perf.julialang.org pick up new names (and their category) from the results. Before
+pushing:
+
+- `julia -t 4 tools/check_blocks.jl` passes on 1.10 and on master.
+- A two-build run of its category stays clean, on two builds that should not differ (two
+  consecutive master builds that touch only tests, say):
+  `julia bench.jl --arm=base=... --arm=head=... --category=CAT --out=r && julia compare.jl r`.
+  A benchmark that flags here will flag on PRs.
+- It does not call anything the commit under test adds. Both arms run the same suite, so
+  it errors on the base arm and the run is reported incomplete.
+- A new category also gets a `benchmarks/CAT.jl` and an entry in `CATEGORIES` in
+  `bench.jl`.
+
+A new benchmark has no history, and it can move the others in its category on master
+once, since they share a process (code placement, heap). Within a run both arms share
+it, so comparisons are unaffected.
 
 ## Running one benchmark locally
 
