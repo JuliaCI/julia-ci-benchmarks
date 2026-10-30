@@ -55,9 +55,11 @@ function carve(specs::Pair{<:Type,<:Integer}...)
     skip = (4096 - Int(UInt(pointer(buf)) % 4096)) % 4096
     offsets = cumsum([skip; sizes[1:end-1]])
     push!(CARVED, buf)
+    # The buffer is zeroed, so any isbits type works, structs included
     return ntuple(length(specs)) do j
         T, n = specs[j]
-        fill!(unsafe_wrap(Array, Ptr{T}(pointer(buf, 1 + offsets[j])), Int(n)), zero(T))
+        isbitstype(T) || error("carve needs an isbits type, got $T")
+        unsafe_wrap(Array, Ptr{T}(pointer(buf, 1 + offsets[j])), Int(n))
     end
 end
 const CARVED = Vector{UInt8}[]

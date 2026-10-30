@@ -2,6 +2,7 @@
 # Unicode iteration and the symbol table.
 module StringsBench
 using ..Driver
+using Printf
 
 # Shared by the benchmarks below: paste this part first to run one of them in the REPL.
 function log_input()
@@ -145,5 +146,74 @@ function small_strings(ks, out)
     return out
 end
 bench(small_strings, small_strings_setup; ops = 4 * 2^14)
+
+# UTF-8 validation and counting over long strings: isvalid on bytes (a shift-based DFA),
+# isascii on ASCII text with one non-ASCII character at the end, and length
+function utf8_validate_setup()
+    r = SplitMix(67)
+    alphabets = (collect("abcdefghijklmnopqrstuvwxyz ,."), collect("àáâäçèéêëñòóöùúüß"),
+                 collect("αβγδεζηθικλμνξοπρστυφχψω"), collect("日本語中文字漢テキスト"), collect("🎉😀🚀🌍✨"))
+    cs = Char[]
+    while length(cs) < 2^16
+        a = alphabets[rand_int(r, 1, 1, 5)[1]]
+        append!(cs, a[rand_int(r, rand_int(r, 1, 1, 12)[1], 1, length(a))])
+    end
+    mixed = String(cs)
+    ascii = String(UInt8.(rand_int(r, 2^18, 0x20, 0x7e))) * "é"
+    return Vector{UInt8}(mixed), mixed, ascii
+end
+utf8_validate(b, mixed, ascii) = (isvalid(String, b), isascii(ascii), length(mixed), length(ascii))
+bench(utf8_validate, utf8_validate_setup; ops = 3 * 2^18)
+
+# Printf's generated formatting code: padded and hexadecimal integers, fixed, exponent
+# and %g floats, strings
+function printf_format_setup()
+    r = SplitMix(68)
+    return rand_int(r, 4096, -10^9, 10^9), rand_f64(r, 4096, -1e4, 1e4), Vector{String}(undef, 4096)
+end
+function printf_format(is, fs, out)
+    for i in eachindex(is, fs, out)
+        out[i] = @sprintf("%8d|%08x|%.3f|%10.4e|%-6s|%g", is[i], is[i] & 0xffffff, fs[i], fs[i], "ab", fs[i] * 1e-3)
+    end
+    return out
+end
+bench(printf_format, printf_format_setup; ops = 4096)
+
+# Everyday transforms of short strings: strip, lowercase, startswith and endswith, chop,
+# replace of a Char, repeat and concatenation. Half the lines are padded, and the lines
+# are reshuffled every sample.
+function string_transforms_setup()
+    lines = [isodd(i) ? string("  ", l, " ") : l for (i, l) in enumerate(log_input())]
+    return lines, Vector{String}(undef, length(lines)), SplitMix(168)
+end
+function string_transforms(lines, out, _)
+    for (i, l) in enumerate(lines)
+        t = lowercase(strip(l))
+        if startswith(t, "2026") && endswith(t, "ms")
+            t = chop(t; tail = 3)
+        end
+        out[i] = replace(t, ' ' => '_') * repeat("-", i % 4) * "|"
+    end
+    return out
+end
+bench(string_transforms, string_transforms_setup; ops = 4096, reset = (lines, out, r) -> shuffle_det!(r, lines))
+
+# Path manipulation as Pkg and code loading do it, all string work: splitdir, splitext,
+# joinpath, and normpath resolving . and .. components
+function path_ops_setup()
+    r = SplitMix(69)
+    parts = ["src", "test", "..", ".", "deps", "lib", "Foo.jl", "bar_baz", "v1.2.3", "~tmp"]
+    paths = [join(parts[rand_int(r, n, 1, 10)], "/") * (n % 3 == 0 ? ".jl" : "") for n in rand_int(r, 4096, 2, 7)]
+    return paths, Vector{String}(undef, 4096)
+end
+function path_ops(paths, out)
+    for (i, p) in enumerate(paths)
+        d, b = splitdir(p)
+        stem, ext = splitext(b)
+        out[i] = normpath(joinpath("/home/user", d, string(stem, ext == ".jl" ? ".ji" : ext)))
+    end
+    return out
+end
+bench(path_ops, path_ops_setup; ops = 4096)
 
 end

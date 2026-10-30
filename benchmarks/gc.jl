@@ -118,4 +118,22 @@ function bigint()
 end
 bench(bigint; ops = 400, metric = "time", tolerance = 0.08)
 
+# Young objects stored into an old Vector{Any}, then a pointer copy within it: the write
+# barrier on array stores and on copyto!, and young collections that scan the remembered
+# array. A full collection before every sample makes the array old again.
+function array_write_barrier_setup()
+    a = Vector{Any}(nothing, 2^16)
+    GC.gc(true)
+    return a
+end
+function array_write_barrier(a)
+    for i in eachindex(a)
+        @inbounds a[i] = Ref(i)
+    end
+    copyto!(a, 2^15 + 1, a, 1, 2^15)
+    return a
+end
+bench(array_write_barrier, array_write_barrier_setup; ops = 2^16, metric = "time", tolerance = 0.08,
+      reset = a -> GC.gc(true), seconds = 1.0)
+
 end

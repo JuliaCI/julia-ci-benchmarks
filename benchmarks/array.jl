@@ -333,4 +333,63 @@ function ptr_store(dst, src)
 end
 bench(ptr_store, ptr_store_setup; ops = 5 * 6 * 6000)
 
+# Editing a Vector in the middle: deleteat! with sorted indices, insert!, splice!,
+# append!, filter! and resize!, which move elements within the Memory
+function vector_edit_setup()
+    r = SplitMix(57)
+    return rand_int(r, 2^14, 0, 10^6), sort!(unique!(rand_int(r, 2^12, 1, 2^14)))
+end
+function vector_edit(x, idx)
+    v = copy(x)
+    deleteat!(v, idx)
+    for k in 1:256
+        insert!(v, 1 + 37k, k)
+    end
+    splice!(v, 100:612, view(x, 1:256))
+    append!(v, x)
+    filter!(isodd, v)
+    resize!(v, length(v) ÷ 2)
+    return v
+end
+bench(vector_edit, vector_edit_setup; ops = 2^14)
+
+# Slices of a matrix: eachcol and eachrow (a view per column and per row) and mapslices
+eachslice_reduce_setup() = reshape(rand_f64(SplitMix(58), 512 * 256), 512, 256)
+function eachslice_reduce(A)
+    a = map(sum, eachcol(A))
+    b = [maximum(r) for r in eachrow(A)]
+    c = mapslices(x -> x ./ sum(x), A; dims = 1)
+    return a, b, c
+end
+bench(eachslice_reduce, eachslice_reduce_setup; ops = 3 * 512 * 256)
+
+# Float ranges: StepRangeLen with a TwicePrecision reference and step, and LinRange,
+# indexed at random, iterated, and broadcast over
+float_ranges_setup() = (rand_int(SplitMix(59), 2^16, 1, 10^6), zeros(2^16))
+function float_ranges(idx, out)
+    r = range(-1.0, 1.0; length = 10^6)
+    l = LinRange(0.0, 3.0, 10^6)
+    s = 0.0
+    @inbounds for i in idx
+        s += r[i] + l[i]
+    end
+    for v in 0.1:0.1:2000.0
+        s += v
+    end
+    out .= r[1:2^16] .+ 2.0 .* view(l, 1:2^16)
+    return s, out
+end
+bench(float_ranges, float_ranges_setup; ops = 2 * 2^16 + 2 * 10^4)
+
+# Strings sorted: every comparison is a memcmp on variable-length data, many of them with
+# a shared prefix. The input is restored before every sample.
+function sort_strings_setup()
+    r = SplitMix(60)
+    pre = ("", "item_", "item_00", "x")
+    x = [string(pre[1 + i % 4], n) for (i, n) in enumerate(rand_int(r, 2^14, 0, 10^7))]
+    return copy(x), x
+end
+sort_strings(v, x) = sort!(v)
+bench(sort_strings, sort_strings_setup; ops = 2^14, reset = (v, x) -> copyto!(v, x))
+
 end

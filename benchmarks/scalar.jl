@@ -3,6 +3,7 @@
 # so the branch predictor cannot learn the range-reduction paths.
 module ScalarBench
 using ..Driver
+using Random
 
 exp_f64_setup() = rand_f64(SplitMix(1), 2^16, -50.0, 50.0)
 function exp_f64(x)
@@ -149,5 +150,74 @@ function pow_int(xs)
     return s
 end
 bench(pow_int, pow_int_setup; ops = 2^16)
+
+# The rest of the libm that Julia implements itself, one call each: tanh, two-argument
+# atan, cbrt, log1p, expm1 and hypot, over arguments that reach their range branches
+function libm_misc_setup()
+    r = SplitMix(50)
+    x, y = carve(Float64, 2^16, 2)
+    x .= rand_f64(r, 2^16, -1, 1) .* exp.(rand_f64(r, 2^16, -8.0, 8.0))
+    y .= rand_f64(r, 2^16, -4.0, 4.0)
+    return x, y
+end
+function libm_misc(x, y)
+    s = 0.0
+    @inbounds for i in eachindex(x, y)
+        a, b = x[i], y[i]
+        s += tanh(a) + atan(a, b) + cbrt(a) + log1p(abs(a)) + expm1(b) + hypot(a, b)
+    end
+    return s
+end
+bench(libm_misc, libm_misc_setup; ops = 6 * 2^16)
+
+# Floats rounded to integers (round, floor, ceil with the inexact check), rounding to
+# decimal digits, and float remainders: mod and rem with a float divisor (#46467)
+float_round_rem_setup() = rand_f64(SplitMix(51), 2^16, -1e6, 1e6)
+function float_round_rem(x)
+    s = 0
+    t = 0.0
+    @inbounds for v in x
+        s += round(Int, v) + floor(Int, v / 3) + ceil(Int, v * 7)
+        t += mod(v, 2.5) + rem(v, 0.7) + round(v; digits = 2)
+    end
+    return s, t
+end
+bench(float_round_rem, float_round_rem_setup; ops = 6 * 2^16)
+
+# Rational{Int} arithmetic: every result is normalized by a gcd (a binary GCD over
+# trailing_zeros) and every operation checks for overflow
+function rational_arith_setup()
+    r = SplitMix(52)
+    a, b, c, d = carve(Int, 2^16, 4)
+    a .= rand_int(r, 2^16, -10^6, 10^6)
+    b .= rand_int(r, 2^16, 1, 10^6)
+    c .= rand_int(r, 2^16, -10^6, 10^6)
+    d .= rand_int(r, 2^16, 1, 10^6)
+    return a, b, c, d
+end
+function rational_arith(a, b, c, d)
+    s = 0
+    @inbounds for i in eachindex(a, b, c, d)
+        p = a[i] // b[i]
+        q = c[i] // d[i]
+        s += numerator(p + q) % 1024 + denominator(p * q) % 1024 + (p < q)
+    end
+    return s
+end
+bench(rational_arith, rational_arith_setup; ops = 2^16)
+
+# Random's default generator, restarted from the same seed before every sample: the SIMD
+# bulk fill behind rand!(rng, ::Array{Float64}), scalar draws from a range (the rejection
+# sampler) and randn's ziggurat
+xoshiro_setup() = (Xoshiro(53), zeros(2^16), zeros(Int, 2^14), zeros(2^14))
+function xoshiro(rng, x, k, z)
+    rand!(rng, x)
+    @inbounds for i in eachindex(k)
+        k[i] = rand(rng, 1:1000)
+    end
+    randn!(rng, z)
+    return x, k, z
+end
+bench(xoshiro, xoshiro_setup; ops = 2^16 + 2^15, reset = (rng, x, k, z) -> Random.seed!(rng, 53))
 
 end

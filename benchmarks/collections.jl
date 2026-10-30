@@ -160,4 +160,110 @@ end
 bench(collect_widen, collect_widen_setup; ops = 2 * 2^16, tolerance = 0.06,
       reset = (xs, r) -> shuffle_det!(r, view(xs, 4:length(xs))))
 
+# Arrays as keys and hashed values: a Dict{Vector{Int}} filled and then queried with
+# equal copies (hash and isequal of arrays), and hash of Float64 vectors, mostly short,
+# a few long
+function hash_arrays_setup()
+    r = SplitMix(61)
+    ks = [rand_int(r, n, 0, 100) for n in rand_int(r, 2048, 1, 32)]
+    fs = [rand_f64(r, n) for n in [rand_int(r, 1024, 1, 64); fill(2^14, 4)]]
+    return ks, map(copy, ks), fs
+end
+function hash_arrays(ks, qs, fs)
+    d = Dict{Vector{Int},Int}()
+    for (i, k) in enumerate(ks)
+        d[k] = i
+    end
+    h = UInt(0)
+    for q in qs
+        h += get(d, q, 0)
+    end
+    for f in fs
+        h += hash(f)
+    end
+    return d, h
+end
+bench(hash_arrays, hash_arrays_setup; ops = 2 * 2048 + 1028)
+
+# Iterating a Dict (the scan over slots), its keys and values, then merge and filter,
+# which build new Dicts
+dict_iterate_setup() = Dict(zip(rand_int(SplitMix(62), 2^15, 1, 2^40), rand_f64(SplitMix(63), 2^15)))
+function dict_iterate(d)
+    s = 0.0
+    for (k, v) in d
+        s += v * (k & 1)
+    end
+    s += sum(values(d)) + sum(keys(d)) % 7
+    return s, merge(d, Dict(1 => 2.0)), filter(p -> p.second > 0.5, d)
+end
+bench(dict_iterate, dict_iterate_setup; ops = 5 * 2^15)
+
+# Composite keys: Tuple{Int,Symbol} hashed field by field, get! with a default function,
+# haskey for misses and pop! with a default
+function dict_tuple_keys_setup()
+    r = SplitMix(64)
+    syms = [Symbol("field_", i) for i in 1:64]
+    return [(a, syms[b]) for (a, b) in zip(rand_int(r, 2^16, 1, 2^12), rand_int(r, 2^16, 1, 64))]
+end
+function dict_tuple_keys(ks)
+    d = Dict{Tuple{Int,Symbol},Vector{Int}}()
+    for (i, k) in enumerate(ks)
+        push!(get!(() -> Int[], d, k), i)
+    end
+    n = 0
+    for k in ks
+        n += haskey(d, (k[1] + 2^12, k[2]))
+    end
+    for i in 1:2:length(ks)
+        n += length(pop!(d, ks[i], Int[]))
+    end
+    return d, n
+end
+bench(dict_tuple_keys, dict_tuple_keys_setup; ops = 2^16 + 2^16 + 2^15)
+
+# Iterators with nested or stateful iteration: product of three ranges, partition into
+# views, and takewhile, whose predicate first fails near the end
+function iterators_nested_setup()
+    x = rand_int(SplitMix(65), 2^18, 0, 999)
+    x[end-100] = 1000
+    return x
+end
+function iterators_nested(x)
+    s = 0
+    for (i, j, k) in Iterators.product(1:64, 1:64, 1:64)
+        s += i * j - k
+    end
+    for c in Iterators.partition(x, 64)
+        s += maximum(c)
+    end
+    s += sum(Iterators.takewhile(<(1000), x))
+    return s
+end
+bench(iterators_nested, iterators_nested_setup; ops = 64^3 + 2 * 2^18)
+
+# BitSet, which the compiler uses throughout: push!, `in`, union, intersect! and
+# iteration over sets with gaps
+function bitset_ops_setup()
+    r = SplitMix(66)
+    return rand_int(r, 2^15, 0, 2^17), rand_int(r, 2^15, 2^10, 2^17 + 2^10)
+end
+function bitset_ops(a, b)
+    sa = BitSet()
+    for x in a
+        push!(sa, x)
+    end
+    sb = BitSet(b)
+    n = 0
+    for x in b
+        n += x in sa
+    end
+    u = union(sa, sb)
+    intersect!(sb, sa)
+    for x in sb
+        n += x
+    end
+    return u, sb, n
+end
+bench(bitset_ops, bitset_ops_setup; ops = 3 * 2^15)
+
 end

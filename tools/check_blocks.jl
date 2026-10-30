@@ -17,6 +17,8 @@ function blocks(path)
     body = Meta.parseall(read(path, String)).args
     mod = only(filter(e -> Meta.isexpr(e, :module), body))
     stmts = filter(e -> !(e isa LineNumberNode), mod.args[end].args)  # newer versions prepend a version
+    # The module's stdlib imports are evaluated in every paste module, as a REPL would have them
+    usings = filter(e -> Meta.isexpr(e, :using) && e != :(using ..Driver), stmts)
     stmts = filter(e -> !(Meta.isexpr(e, :using)), stmts)
     src = read(path, String)
     shared = Any[]
@@ -27,6 +29,8 @@ function blocks(path)
         shared = filter(e -> !(e isa LineNumberNode), pre.args)
         shared_strs = Set(string.(shared))
         stmts = filter(e -> !(string(e) in shared_strs), stmts)
+        # The shared part runs its own imports, in order
+        usings = filter(e -> !(string(e) in shared_strs), usings)
     end
     out = Vector{Any}[]
     cur = Any[]
@@ -37,18 +41,18 @@ function blocks(path)
             cur = Any[]
         end
     end
-    return shared, out
+    return usings, shared, out
 end
 
 function check(category)
     path = joinpath(@__DIR__, "..", "benchmarks", category * ".jl")
-    shared, bs = blocks(path)
+    usings, shared, bs = blocks(path)
     failures = String[]
     for (i, b) in enumerate(bs)
         # Bound in Main as a REPL paste would be, so that serialization finds its types
         m = Core.eval(Main, :(module $(Symbol("Paste_", category, "_", i)) end))
         Core.eval(m, :(using Main.Driver))
-        Core.eval(m, :(using Serialization))
+        foreach(u -> Core.eval(m, u), usings)
         try
             for e in shared
                 Core.eval(m, e)

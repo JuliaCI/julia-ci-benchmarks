@@ -92,4 +92,42 @@ function show_types(ts, out, _)
 end
 bench(show_types, show_types_setup; ops = length(TYPES), reset = (ts, out, r) -> shuffle_det!(r, ts))
 
+# promote_type, typejoin and promote_typejoin of runtime types, as collect, map, vcat and
+# broadcast compute element types
+function promote_join_setup()
+    r = SplitMix(77)
+    ts = Any[Int, Int8, UInt16, Float32, Float64, BigFloat, Rational{Int}, ComplexF32, Bool, Missing,
+             Nothing, String, Vector{Int}, Tuple{Int,Float64}, Union{Int,Missing}, Char]
+    n = length(ts)
+    return [(ts[i], ts[j]) for (i, j) in zip(rand_int(r, 4096, 1, n), rand_int(r, 4096, 1, n))], SplitMix(377)
+end
+function promote_join(ps, _)
+    n = 0
+    for (a, b) in ps
+        n += isconcretetype(promote_type(a, b)) + isconcretetype(typejoin(a, b)) +
+             isconcretetype(Base.promote_typejoin(a, b))
+    end
+    return n
+end
+bench(promote_join, promote_join_setup; ops = 3 * 4096, reset = (ps, r) -> shuffle_det!(r, ps))
+
+# Base.promote_op with runtime argument types, which calls inference's return_type and
+# finds the result cached (every query was answered in the warmup calls)
+function promote_op_runtime_setup()
+    r = SplitMix(78)
+    fs = Any[+, *, /, max, div, ==]
+    ts = Any[Int, Float64, Float32, Int8, Rational{Int}, ComplexF64, Bool, UInt]
+    n = length(ts)
+    return [(fs[i], ts[j], ts[k]) for (i, j, k) in zip(rand_int(r, 2048, 1, 6), rand_int(r, 2048, 1, n), rand_int(r, 2048, 1, n))],
+           SplitMix(378)
+end
+function promote_op_runtime(qs, _)
+    n = 0
+    for (f, a, b) in qs
+        n += isconcretetype(Base.promote_op(f, a, b))
+    end
+    return n
+end
+bench(promote_op_runtime, promote_op_runtime_setup; ops = 2048, reset = (qs, r) -> shuffle_det!(r, qs))
+
 end

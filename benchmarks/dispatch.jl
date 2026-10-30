@@ -218,4 +218,65 @@ function dynamic_ctor(xs, out, _)
 end
 bench(dynamic_ctor, dynamic_ctor_setup; ops = 2^14, tolerance = 0.06, reset = (xs, out, r) -> shuffle_det!(r, xs))
 
+# Keyword calls whose types are known, into functions that are not inlined: the kwcall
+# entry and its NamedTuple, defaults filled in the callee, and keywords forwarded with
+# `kw...` to another keyword function, as wrappers in packages do. None of it should
+# allocate or dispatch.
+@noinline kwinner(x; scale = 1.0, shift = 0.0, flip::Bool = false) = (flip ? -x : x) * scale + shift
+@noinline kwouter(x; kw...) = kwinner(x; kw...) + kwinner(2x; flip = true, kw...)
+kwcall_static_setup() = rand_f64(SplitMix(74), 2^14)
+function kwcall_static(xs)
+    s = 0.0
+    for x in xs
+        s += kwinner(x; scale = 2.0) + kwouter(x; shift = x) + kwouter(x; scale = 0.5, shift = 1.0)
+    end
+    return s
+end
+bench(kwcall_static, kwcall_static_setup; ops = 5 * 2^14)
+
+# A getproperty overload that switches on the field name and setproperty! that converts
+# the value: cheap only while the Symbol is constant-propagated through both
+mutable struct Params
+    a::Float64
+    b::Float64
+    n::Int
+end
+struct ParamView
+    p::Params
+end
+function Base.getproperty(v::ParamView, s::Symbol)
+    p = getfield(v, :p)
+    return s === :total ? p.a + p.b : s === :ratio ? p.a / p.n : getfield(p, s)
+end
+function property_overload_setup()
+    r = SplitMix(75)
+    return [ParamView(Params(x, 1.0, 1)) for x in rand_f64(r, 2^16)], rand_f64(r, 2^16)
+end
+function property_overload(vs, xs)
+    s = 0.0
+    for (v, x) in zip(vs, xs)
+        p = getfield(v, :p)
+        p.a = x
+        p.n = round(Int, 10x) + 1
+        p.b = 1
+        s += v.total + v.ratio + v.n + v.a
+    end
+    return s
+end
+bench(property_overload, property_overload_setup; ops = 2^16)
+
+# Calls of a deprecated method with deprecation warnings off, the default: the depwarn
+# check has to stay cheap (#58326)
+new_api(x) = 2x + 1
+Base.@deprecate old_api(x) new_api(x) false
+deprecated_call_setup() = rand_f64(SplitMix(76), 2^12)
+function deprecated_call(xs)
+    s = 0.0
+    for x in xs
+        s += old_api(x)
+    end
+    return s
+end
+bench(deprecated_call, deprecated_call_setup; ops = 2^12, tolerance = 0.06)
+
 end

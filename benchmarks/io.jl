@@ -101,4 +101,69 @@ function small_reads(io, a, b)
 end
 bench(small_reads, small_reads_setup; ops = 2 * 2^13)
 
+# show of containers into an IOBuffer: text/plain display of a matrix (column alignment),
+# a Vector{Float64} under :compact, a Dict and a NamedTuple
+function show_containers_setup()
+    r = SplitMix(70)
+    M = reshape(rand_f64(r, 24 * 8, -100, 100), 24, 8)
+    v = rand_f64(r, 200)
+    d = Dict(string("key", i) => i / 3 for i in 1:64)
+    nt = (a = 1, b = "two", c = [3.0, 4.0], d = (5, :six))
+    return M, v, d, nt
+end
+function show_containers(M, v, d, nt)
+    io = IOBuffer()
+    show(io, MIME"text/plain"(), M)
+    show(IOContext(io, :compact => true), v)
+    show(io, d)
+    for _ in 1:16
+        show(io, nt)
+    end
+    return String(take!(io))
+end
+bench(show_containers, show_containers_setup; ops = 24 * 8 + 200 + 64 + 16)
+
+# Bit types written to and read back from an IOBuffer: write(io, x) of each value, buffer
+# growth, and read(io, T)
+binary_rw_setup() = (rand_int(SplitMix(71), 2^13, -10^15, 10^15), rand_f64(SplitMix(72), 2^13))
+function binary_rw(is, fs)
+    io = IOBuffer()
+    for i in eachindex(is, fs)
+        write(io, is[i])
+        write(io, fs[i])
+        write(io, Int32(i))
+        write(io, UInt8(i & 0xff))
+    end
+    seekstart(io)
+    s = 0
+    t = 0.0
+    while !eof(io)
+        s += read(io, Int)
+        t += read(io, Float64)
+        s += read(io, Int32) + read(io, UInt8)
+    end
+    return io, s, t
+end
+bench(binary_rw, binary_rw_setup; ops = 8 * 2^13)
+
+# A libuv pipe within the process: a writer task hands 1 MiB to the reading task in
+# 16 KiB writes, through uv_write, the event loop and task switches. Wall time, since
+# the event loop can wait in the kernel.
+pipe_roundtrip_setup() = (UInt8.(rand_int(SplitMix(73), 2^14, 0, 255)), zeros(UInt8, 2^20))
+function pipe_roundtrip(chunk, buf)
+    p = Pipe()
+    Base.link_pipe!(p; reader_supports_async = true, writer_supports_async = true)
+    w = @async begin
+        for _ in 1:64
+            write(p.in, chunk)
+        end
+        close(p.in)
+    end
+    read!(p.out, buf)
+    wait(w)
+    close(p.out)
+    return buf
+end
+bench(pipe_roundtrip, pipe_roundtrip_setup; ops = 64, metric = "time", tolerance = 0.15)
+
 end

@@ -196,4 +196,59 @@ find_extrema_setup() = rand_f64(SplitMix(32), 2^16)
 find_extrema(x) = findmin(x)[1] + findmax(x)[1] + x[argmin(x)] + x[argmax(x)]
 bench(find_extrema, find_extrema_setup; ops = 4 * 2^16)
 
+# Early-exit searches, which LLVM vectorizes only in recent versions or not at all:
+# findfirst and findlast with a predicate, `in`, and findfirst on bytes, which Base sends
+# to memchr. Each needle is near the end or absent, so every search scans the array.
+function find_search_setup()
+    r = SplitMix(54)
+    v = rand_int(r, 2^16, 1, 10^9)
+    b = UInt8.(rand_int(r, 2^18, 0x20, 0x7e))
+    v[end-3] = 0
+    b[end-5] = 0x0a
+    return v, b
+end
+find_search(v, b) = findfirst(iszero, v) + (-1 in v) + something(findlast(>(10^9 + 1), v), 0) +
+                    something(findfirst(==(0x0a), b), 0)
+bench(find_search, find_search_setup; ops = 3 * 2^16 + 2^18)
+
+# Prefix scans, a dependence from each element to the next: cumsum! on floats and
+# integers, accumulate with max, and diff
+function prefix_scan_setup()
+    r = SplitMix(55)
+    x, y, xi, yi = carve(Float64 => 2^16, Float64 => 2^16, Int => 2^16, Int => 2^16)
+    x .= rand_f64(r, 2^16, -1, 1)
+    xi .= rand_int(r, 2^16, -1000, 1000)
+    return x, y, xi, yi
+end
+prefix_scan(x, y, xi, yi) = (cumsum!(y, x), cumsum!(yi, xi), accumulate(max, x), diff(x))
+bench(prefix_scan, prefix_scan_setup; ops = 4 * 2^16)
+
+# An array of structs updated in place from another (#47138): interleaved loads and
+# stores of four Float32 fields, which the vectorizer has to recognize as such
+struct Particle
+    x::Float32
+    y::Float32
+    z::Float32
+    m::Float32
+end
+function aos_update_setup()
+    r = SplitMix(56)
+    p, v = carve(Particle, 2^16, 2)
+    a = rand_f32(r, 8 * 2^16, -1, 1)
+    for i in 1:2^16
+        p[i] = Particle(a[8i-7], a[8i-6], a[8i-5], 1 + abs(a[8i-4]))
+        v[i] = Particle(a[8i-3], a[8i-2], a[8i-1], a[8i])
+    end
+    return p, v
+end
+function aos_update(p, v)
+    dt = 0.01f0
+    @inbounds for i in eachindex(p, v)
+        a, b = p[i], v[i]
+        p[i] = Particle(a.x + dt * b.x, a.y + dt * b.y, a.z + dt * b.z, a.m)
+    end
+    return p
+end
+bench(aos_update, aos_update_setup; ops = 2^16)
+
 end

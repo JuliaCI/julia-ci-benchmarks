@@ -2,6 +2,7 @@
 # reflection-driven copying, global bindings, scoped and task-local state.
 module RuntimeBench
 using ..Driver
+using Logging
 
 # Shared by the benchmarks below: paste this part first to run one of them in the REPL.
 struct ParseFailure <: Exception
@@ -178,5 +179,183 @@ function const_field_roots(s, ks, _)
     return s.cols[1][1]
 end
 bench(const_field_roots, const_field_roots_setup; ops = 2^14, reset = (s, ks, r) -> shuffle_det!(r, ks))
+
+# A backtrace turned into frames, as error display, logging and Test do it: the debug-info
+# lookup of every instruction pointer, inlined frames included
+@noinline deep_throw(n) = n == 0 ? error("bottom") : (deep_throw(n - 1); n)
+function stacktrace_lookup_setup()
+    try
+        deep_throw(40)
+    catch
+        return catch_backtrace()
+    end
+end
+stacktrace_lookup(bt) = stacktrace(bt)
+bench(stacktrace_lookup, stacktrace_lookup_setup)
+
+# Log statements: @debug below the minimum level (the early check), @info through a
+# SimpleLogger into an IOBuffer (message and key-value formatting), and @info under
+# with_logger(NullLogger()) (#55761). The buffer is emptied before every sample.
+function log_statements_setup()
+    io = IOBuffer()
+    return io, Logging.SimpleLogger(io, Logging.Info), rand_int(SplitMix(79), 2^10, 0, 10^6)
+end
+function log_statements(io, logger, xs)
+    with_logger(logger) do
+        for (i, x) in enumerate(xs)
+            @debug "skipped" x
+            i % 8 == 0 && @info "value" x i
+        end
+    end
+    with_logger(NullLogger()) do
+        for x in xs
+            @info "dropped" x
+        end
+    end
+    return io
+end
+bench(log_statements, log_statements_setup; ops = 3 * 2^10, reset = (io, logger, xs) -> take!(io))
+
+# Locks taken and released without contention, as every IO operation and many caches do:
+# ReentrantLock, reentrantly too, @lock, and a SpinLock
+lock_uncontended_setup() = (ReentrantLock(), Threads.SpinLock(), Ref(0))
+function lock_uncontended(rl, sl, c)
+    for i in 1:2^14
+        lock(rl)
+        c[] += i
+        unlock(rl)
+        Base.@lock rl begin
+            lock(rl)
+            c[] -= 1
+            unlock(rl)
+        end
+        lock(sl)
+        c[] += 1
+        unlock(sl)
+    end
+    return c[]
+end
+bench(lock_uncontended, lock_uncontended_setup; ops = 3 * 2^14)
+
+# Globals looked up by name at run time, as getproperty on a Module does: isdefined and
+# getglobal on Base, through the module's binding table. A few names do not exist. The
+# names are reshuffled every sample.
+function module_bindings_setup()
+    names = [:sum, :map, :filter, :push!, :length, :Dict, :Vector, :println, :string, :parse, :sort!, :copy,
+             :getindex, :setindex!, :iterate, :zero, :one, :typemax, :Int, :Float64, :String, :Symbol, :pi,
+             :stdout, :ENV, :VERSION, :nothing, :missing, :isless, :hash, :show, :print, :reduce, :foldl,
+             :mapreduce, :findfirst, :replace, :split, :join, :abs, :sqrt, :exp, :log, :sin, :max, :min,
+             :reverse, :unique, :keys, :values, :haskey, :get, :get!, :merge, :empty!, :resize!, :fill,
+             :zeros, :no_such_name_1, :no_such_name_2, :no_such_name_3, :no_such_name_4, :Base, :Core]
+    return repeat(names, 64), SplitMix(180)
+end
+function module_bindings(names, _)
+    n = 0
+    for s in names
+        if isdefined(Base, s)
+            n += getglobal(Base, s) isa Function
+        end
+    end
+    return n
+end
+bench(module_bindings, module_bindings_setup; ops = 64 * 64, reset = (names, r) -> shuffle_det!(r, names))
+
+# Strings passed to C and back: the Cstring conversion and its check for NUL bytes,
+# strlen and strchr, and unsafe_string copying the result
+function ccall_string_setup()
+    r = SplitMix(80)
+    strs = [String(UInt8.(rand_int(r, n, 0x61, 0x7a))) for n in rand_int(r, 4096, 1, 200)]
+    return strs, Vector{String}(undef, 4096)
+end
+function ccall_string(strs, out)
+    n = 0
+    for (i, s) in enumerate(strs)
+        n += Int(ccall(:strlen, Csize_t, (Cstring,), s))
+        p = ccall(:strchr, Ptr{UInt8}, (Cstring, Cint), s, Cint('q'))
+        out[i] = p == C_NULL ? "" : unsafe_string(p)
+    end
+    return n, out
+end
+bench(ccall_string, ccall_string_setup; ops = 4096)
+
+# Large immutables passed to and returned from calls that are not inlined: twelve floats
+# returned through a hidden pointer (sret), and a struct with references among its
+# fields, whose GC roots are returned alongside
+struct Big12
+    t::NTuple{12,Float64}
+end
+struct WithRefs
+    name::String
+    a::Float64
+    b::Float64
+    v::Vector{Float64}
+end
+@noinline step12(s::Big12, x) = Big12(ntuple(i -> s.t[i] * 0.5 + x * i, Val(12)))
+@noinline retag(w::WithRefs, x, names) = WithRefs(names[1 + (x > 0.5)], w.a + x, w.b * x, w.v)
+struct_abi_setup() = (rand_f64(SplitMix(81), 2^14), ["low", "high"], [1.0])
+function struct_abi(xs, names, v)
+    s = Big12(ntuple(Float64, Val(12)))
+    w = WithRefs("", 0.0, 1.0, v)
+    for x in xs
+        s = step12(s, x)
+        w = retag(w, x, names)
+    end
+    return s, w
+end
+bench(struct_abi, struct_abi_setup; ops = 2 * 2^14)
+
+# Mutable objects that never escape: allocation elimination must turn a Ref and a mutable
+# struct into registers, inside the loop and carried around it. Losing it makes every
+# iteration allocate.
+mutable struct Acc
+    s::Float64
+    n::Int
+end
+@inline add!(a::Acc, x) = (a.s += x; a.n += 1; a)
+nonescaping_mutable_setup() = rand_f64(SplitMix(82), 2^16)
+function nonescaping_mutable(xs)
+    tot = 0.0
+    outer = Acc(0.0, 0)
+    for x in xs
+        a = Acc(0.0, 0)
+        r = Ref(x)
+        add!(a, r[])
+        add!(a, 2 * r[])
+        r[] = a.s / a.n
+        tot += r[]
+        add!(outer, x)
+    end
+    return tot + outer.s / outer.n
+end
+bench(nonescaping_mutable, nonescaping_mutable_setup; ops = 2^16)
+
+# Recursion: the call overhead of a specialized signature (fib), and a recursive walk
+# whose frames hold a reference across each call, so every frame roots it
+fibr(n) = n < 2 ? n : fibr(n - 1) + fibr(n - 2)
+struct TNode
+    v::Vector{Int}
+    kids::Vector{TNode}
+end
+function walk(t::TNode, d)
+    s = t.v[1 + d % length(t.v)]
+    for k in t.kids
+        s += walk(k, d + 1)
+    end
+    return s + length(t.v)
+end
+function recursive_calls_setup()
+    r = SplitMix(83)
+    leaf() = TNode(rand_int(r, rand_int(r, 1, 1, 4)[1], 0, 100), TNode[])
+    # Each node attaches to a random earlier one
+    nodes = [leaf()]
+    for _ in 1:2^13
+        c = leaf()
+        push!(nodes[rand_int(r, 1, 1, length(nodes))[1]].kids, c)
+        push!(nodes, c)
+    end
+    return 21, nodes[1]
+end
+recursive_calls(n, t) = fibr(n) + walk(t, 0)
+bench(recursive_calls, recursive_calls_setup)
 
 end

@@ -185,4 +185,14 @@ optimize_many_opaque_closures(state) = optimize!(state)
 bench(optimize_many_opaque_closures, optimize_many_opaque_closures_setup; seconds = 0.25, metric = "instructions",
       reset = state -> infer_unoptimized!(state, many_opaque_closures, (Vector{Float64},)))
 
+# A keyword call through Core.kwcall into sort!, with a `by` function: the kwsorter, the
+# sort algorithm dispatch tree and the comparators, inferred and optimized
+infer_sort_kwcall() = infer(Core.kwcall, (NamedTuple{(:by, :rev),Tuple{typeof(abs),Bool}}, typeof(sort!), Vector{Float64}))
+bench(infer_sort_kwcall; seconds = 0.25, metric = "instructions", reset = GC.gc)
+
+# show of a Dict of vectors: the printing machinery, IOContext properties and the
+# type-printing paths, abstract interpretation alone
+abstract_show_dict() = infer(show, (IOBuffer, Dict{String,Vector{Int}}); optimize = false)
+bench(abstract_show_dict; seconds = 0.25, metric = "instructions", reset = GC.gc)
+
 end

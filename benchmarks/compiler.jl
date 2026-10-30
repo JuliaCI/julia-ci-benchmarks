@@ -46,6 +46,9 @@ function large_function_src()
     return String(take!(io))
 end
 const BIG_SRC = large_function_src()
+# Every top-level statement of `ex` lowered into a fresh module (define_methods,
+# define_structs, eval_toplevel), so that a sample only evaluates them
+lowered_in_fresh_module(ex) = (m = fresh_module(); (m, Any[Meta.lower(m, e) for e in ex.args if !(e isa LineNumberNode)]))
 # End of the shared part.
 
 parse_file_setup() = SRC
@@ -226,5 +229,77 @@ function method_invalidate(workload_ref)
     m
 end
 bench(method_invalidate, method_invalidate_setup; reset = workload_ref -> (workload_ref[] = prepare_invalidate()), seconds = 1.0)
+
+# Many short parses, as the REPL, Pluto and string macros do them: the parser's setup per
+# call weighs as much as the parsing
+const SHORT_EXPRS = ["x + 1", "f(a, b; c = 2)", "[i^2 for i in 1:10 if isodd(i)]", "a.b.c[1, end]",
+                     "\"str \$x and \$(y + 1)\"", "function f(x) x end", "x -> x^2", "@time foo()",
+                     "let a = 1; a end", "A[1, :] .= 2", "1:2:10", "Int[1, 2, 3]", "(a = 1, b = 2)",
+                     "x::Int", "if a; b else c end", "try f() catch e end", "using Foo: bar", "raw\"x\\y\"",
+                     "0x1f + 1e-3 * 2im", "struct P{T} x::T end"]
+parse_short_setup() = repeat(SHORT_EXPRS, 50)
+parse_short(strs) = map(Meta.parse, strs)
+bench(parse_short, parse_short_setup; ops = 1000)
+
+# Method definitions evaluated one by one, lowered in the untimed reset: jl_method_def,
+# signature checks and insertion into method tables that grow to 8 methods each
+const METHODS_SRC = join(["f$(i % 40)(x::$(("Int", "Float64", "AbstractString", "Vector{T} where T", "Any",
+                                            "Tuple{Int,Vararg{Int}}", "Type{<:Real}", "Union{Nothing,Symbol}")[1 + i ÷ 40]), y) = $i"
+                          for i in 0:319], "\n")
+define_methods_setup() = (Meta.parseall(METHODS_SRC), Ref{Any}())
+function define_methods(_, state)
+    m, thunks = state[]
+    for t in thunks
+        Core.eval(m, t)
+    end
+    return m
+end
+bench(define_methods, define_methods_setup; ops = 320, seconds = 1.0, reset = (ex, state) -> (state[] = lowered_in_fresh_module(ex)))
+
+# Type definitions evaluated one by one, lowered in the untimed reset: jl_new_datatype,
+# field types and layout, the type cache, and the default constructors' methods
+const STRUCTS_SRC = join(["""
+    struct S$i{T<:Real}
+        a::T
+        b::Vector{T}
+        c::Union{Nothing,String}
+    end
+    mutable struct M$i
+        x::Int
+        const y::Float64
+        z::Any
+    end
+    abstract type A$i <: Number end
+    """ for i in 1:20], "\n")
+define_structs_setup() = (Meta.parseall(STRUCTS_SRC), Ref{Any}())
+function define_structs(_, state)
+    m, thunks = state[]
+    for t in thunks
+        Core.eval(m, t)
+    end
+    return m
+end
+bench(define_structs, define_structs_setup; ops = 60, seconds = 1.0, reset = (ex, state) -> (state[] = lowered_in_fresh_module(ex)))
+
+# Top-level statements without loops, which run in the interpreter rather than being
+# compiled: global assignments, constants, calls into Base, conditionals. Lowered in the
+# untimed reset.
+const TOPLEVEL_SRC = join(["""
+    a$i = $(i == 1 ? 0 : "a$(i-1)") + $i
+    const c$i = (a$i, "s$i")
+    v$i = [a$i, 2a$i]
+    push!(v$i, length(c$i[2]))
+    t$i = typeof(c$i)
+    isodd(a$i) && (b$i = v$i[end])
+    """ for i in 1:150], "\n")
+eval_toplevel_setup() = (Meta.parseall(TOPLEVEL_SRC), Ref{Any}())
+function eval_toplevel(_, state)
+    m, thunks = state[]
+    for t in thunks
+        Core.eval(m, t)
+    end
+    return m
+end
+bench(eval_toplevel, eval_toplevel_setup; ops = 900, seconds = 1.0, reset = (ex, state) -> (state[] = lowered_in_fresh_module(ex)))
 
 end

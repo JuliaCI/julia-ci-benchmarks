@@ -770,4 +770,437 @@ function cg_poisson(x, b, r, p, ap)
 end
 bench(cg_poisson, cg_poisson_setup; ops = 30 * 96^2)
 
+# Norvig's spelling corrector (BaseBenchmarks' "spellcheck", #50458): every edit at
+# distance one of a word built as a new String and looked up in a Dict of word counts
+function spellcheck_setup()
+    r = SplitMix(84)
+    word(n) = String([Char('a' + Int(Driver.next!(r) % 26)) for _ in 1:n])
+    words = [word(n) for n in rand_int(r, 4000, 3, 9)]
+    counts = Dict(w => c for (w, c) in zip(words, rand_int(r, 4000, 1, 1000)))
+    queries = map(words[1:31:end]) do w
+        i = 1 + Int(Driver.next!(r) % length(w))
+        string(w[1:i-1], 'q', w[i+1:end])
+    end
+    return counts, queries
+end
+function edits1(w)
+    out = String[]
+    for i in 0:length(w)
+        a, b = w[1:i], w[i+1:end]
+        isempty(b) || push!(out, a * b[2:end])
+        length(b) > 1 && push!(out, string(a, b[2], b[1], b[3:end]))
+        for c in 'a':'z'
+            isempty(b) || push!(out, string(a, c, b[2:end]))
+            push!(out, string(a, c, b))
+        end
+    end
+    return out
+end
+function correct(counts, w)
+    haskey(counts, w) && return w
+    best, bc = w, 0
+    for e in edits1(w)
+        c = get(counts, e, 0)
+        if c > bc
+            best, bc = e, c
+        end
+    end
+    return best
+end
+spellcheck(counts, queries) = [correct(counts, q) for q in queries]
+bench(spellcheck, spellcheck_setup; ops = 130)
+
+# Root finding with the function and its parameter passed down as closures: bisection,
+# then Newton steps, through a solver that only forwards its function arguments. Julia
+# does not specialize `solve` on them, so it calls bisect and newton dynamically with
+# boxed closures, which is the cost this keeps an eye on (#42007).
+function bisect(f, a, b, tol)
+    fa = f(a)
+    while b - a > tol
+        m = (a + b) / 2
+        fm = f(m)
+        if sign(fm) == sign(fa)
+            a, fa = m, fm
+        else
+            b = m
+        end
+    end
+    return (a + b) / 2
+end
+function newton(f, df, x)
+    for _ in 1:8
+        x -= f(x) / df(x)
+    end
+    return x
+end
+solve(f, df, a, b) = newton(f, df, bisect(f, a, b, 1e-3))
+root_finding_setup() = rand_f64(SplitMix(85), 2^12, 0.5, 4.0)
+function root_finding(ps)
+    s = 0.0
+    for p in ps
+        s += solve(x -> x^3 - p * x - 1, x -> 3x^2 - p, 0.0, 10.0)
+    end
+    return s
+end
+bench(root_finding, root_finding_setup; ops = 2^12, tolerance = 0.06)
+
+# Forward-mode automatic differentiation with a dual number type, the ForwardDiff pattern
+# without the package (#60243): a Real subtype carrying an NTuple of partials, generic
+# code instantiated on it through promotion, the gradient of Rosenbrock in chunks of 4
+struct Dual{N} <: Real
+    v::Float64
+    p::NTuple{N,Float64}
+end
+Base.:+(a::Dual{N}, b::Dual{N}) where {N} = Dual(a.v + b.v, a.p .+ b.p)
+Base.:-(a::Dual{N}, b::Dual{N}) where {N} = Dual(a.v - b.v, a.p .- b.p)
+Base.:*(a::Dual{N}, b::Dual{N}) where {N} = Dual(a.v * b.v, a.v .* b.p .+ b.v .* a.p)
+Base.:^(a::Dual, n::Integer) = Dual(a.v^n, (n * a.v^(n - 1)) .* a.p)
+Base.zero(::Type{Dual{N}}) where {N} = Dual(0.0, ntuple(_ -> 0.0, Val(N)))
+Base.convert(::Type{Dual{N}}, x::Real) where {N} = Dual(Float64(x), ntuple(_ -> 0.0, Val(N)))
+Base.convert(::Type{Dual{N}}, x::Dual{N}) where {N} = x
+Base.promote_rule(::Type{Dual{N}}, ::Type{<:Real}) where {N} = Dual{N}
+function rosenbrock(x::AbstractVector{T}) where {T}
+    s = zero(T)
+    for i in 1:length(x)-1
+        s += 100 * (x[i+1] - x[i]^2)^2 + (1 - x[i])^2
+    end
+    return s
+end
+dual_gradient_setup() = (rand_f64(SplitMix(86), 256, -2, 2), zeros(256), Vector{Dual{4}}(undef, 256))
+function dual_gradient(x, g, xd)
+    for c in 1:4:length(x)
+        for i in eachindex(x)
+            xd[i] = Dual(x[i], ntuple(k -> Float64(i == c + k - 1), Val(4)))
+        end
+        r = rosenbrock(xd)
+        g[c:c+3] .= r.p
+    end
+    return g
+end
+bench(dual_gradient, dual_gradient_setup; ops = 64 * 255)
+
+# Go, ported from BaseBenchmarks' "go" (#1169): random games on a 9x9 board held in a
+# mutable struct with Matrix fields, stone strings as circular lists in an array, and
+# many small branchy helpers that must inline into each other. Its own xorshift
+# generator restarts from the same seed every sample.
+const GO_EMPTY = 0
+const GO_WHITE = 1
+const GO_BLACK = 2
+const GO_DEAD = 0
+const GO_ALIVE = 1
+const GO_WHITE_TERRITORY = 3
+const GO_BLACK_TERRITORY = 4
+const GO_UNKNOWN = 5
+const GO_DI = (-1, 1, 0, 0)
+const GO_DJ = (0, 0, -1, 1)
+mutable struct XorRNG
+    state::UInt32
+end
+function xor_randn!(rng::XorRNG, n::Int)
+    rng.state = xor(rng.state, rng.state << 13)
+    rng.state = xor(rng.state, rng.state >> 17)
+    rng.state = xor(rng.state, rng.state << 5)
+    return Int(rng.state % UInt32(n))
+end
+mutable struct Board
+    size::Int
+    komi::Float64
+    board::Matrix{Int}
+    next_stone::Matrix{Int}
+    final_status::Matrix{Int}
+    ko_i::Int
+    ko_j::Int
+    rng::XorRNG
+end
+Board(n::Int) = Board(n, 0.5, zeros(Int, n, n), zeros(Int, n, n), zeros(Int, n, n), 0, 0, XorRNG(1))
+Base.getindex(b::Board, i::Int, j::Int) = b.board[i, j]
+Base.getindex(b::Board, pos::Int) = b.board[pos]
+other_color(color::Int) = ifelse(color == GO_WHITE, GO_BLACK, GO_WHITE)
+go_neighbor(i::Int, j::Int, k::Int) = (i + GO_DI[k], j + GO_DJ[k])
+ij2pos(b::Board, i::Int, j::Int) = (j - 1) * b.size + i
+pos2ij(b::Board, pos::Int) = (1 + mod(pos - 1, b.size), 1 + fld(pos - 1, b.size))
+is_pass_move(i::Int, j::Int) = i == 0 && j == 0
+on_board(b::Board, i::Int, j::Int) = i >= 1 && i <= b.size && j >= 1 && j <= b.size
+function legal_move(b::Board, i::Int, j::Int, color::Int)
+    is_pass_move(i, j) && return true
+    b[i, j] != GO_EMPTY && return false
+    other = other_color(color)
+    return !(i == b.ko_i && j == b.ko_j &&
+             ((on_board(b, i - 1, j) && b[i-1, j] == other) || (on_board(b, i + 1, j) && b[i+1, j] == other)))
+end
+# Does the string at (i, j) have a liberty other than (libi, libj)?
+function has_additional_liberty(b::Board, i::Int, j::Int, libi::Int, libj::Int)
+    start = ij2pos(b, i, j)
+    pos = start
+    while true
+        ai, aj = pos2ij(b, pos)
+        for k in 1:4
+            bi, bj = go_neighbor(ai, aj, k)
+            if on_board(b, bi, bj) && b[bi, bj] == GO_EMPTY && (bi != libi || bj != libj)
+                return true
+            end
+        end
+        pos = b.next_stone[pos]
+        pos == start && break
+    end
+    return false
+end
+function provides_liberty(b::Board, ai::Int, aj::Int, i::Int, j::Int, color::Int)
+    !on_board(b, ai, aj) && return false
+    b[ai, aj] == GO_EMPTY && return true
+    b[ai, aj] == color && return has_additional_liberty(b, ai, aj, i, j)
+    return !has_additional_liberty(b, ai, aj, i, j)
+end
+function suicide(b::Board, i::Int, j::Int, color::Int)
+    for k in 1:4
+        provides_liberty(b, go_neighbor(i, j, k)..., i, j, color) && return false
+    end
+    return true
+end
+function same_string(b::Board, pos1::Int, pos2::Int)
+    pos = pos1
+    while true
+        pos == pos2 && return true
+        pos = b.next_stone[pos]
+        pos == pos1 && break
+    end
+    return false
+end
+function remove_string!(b::Board, i::Int, j::Int)
+    start = ij2pos(b, i, j)
+    pos = start
+    removed = 0
+    while true
+        b.board[pos] = GO_EMPTY
+        removed += 1
+        pos = b.next_stone[pos]
+        pos == start && break
+    end
+    return removed
+end
+function play_move!(b::Board, i::Int, j::Int, color::Int)
+    b.ko_i = 0
+    b.ko_j = 0
+    is_pass_move(i, j) && return nothing
+    if suicide(b, i, j, color)
+        for k in 1:4
+            ai, aj = go_neighbor(i, j, k)
+            on_board(b, ai, aj) && b[ai, aj] == color && remove_string!(b, ai, aj)
+        end
+        return nothing
+    end
+    captured = 0
+    for k in 1:4
+        ai, aj = go_neighbor(i, j, k)
+        if on_board(b, ai, aj) && b[ai, aj] == other_color(color) && !has_additional_liberty(b, ai, aj, i, j)
+            captured += remove_string!(b, ai, aj)
+        end
+    end
+    pos = ij2pos(b, i, j)
+    b.board[pos] = color
+    b.next_stone[pos] = pos
+    for k in 1:4
+        ai, aj = go_neighbor(i, j, k)
+        pos2 = ij2pos(b, ai, aj)
+        if on_board(b, ai, aj) && b[pos2] == color && !same_string(b, pos, pos2)
+            b.next_stone[pos], b.next_stone[pos2] = b.next_stone[pos2], b.next_stone[pos]
+        end
+    end
+    # A single stone that captured a single stone may be a ko
+    if captured == 1 && b.next_stone[pos] == pos
+        for k in 1:4
+            ai, aj = go_neighbor(i, j, k)
+            if on_board(b, ai, aj) && b[ai, aj] == GO_EMPTY
+                if !has_additional_liberty(b, i, j, ai, aj)
+                    b.ko_i = ai
+                    b.ko_j = aj
+                end
+                break
+            end
+        end
+    end
+    return nothing
+end
+function set_final_status_string!(b::Board, pos::Int, status::Int)
+    start = pos
+    while true
+        b.final_status[pos] = status
+        pos = b.next_stone[pos]
+        pos == start && break
+    end
+end
+function compute_final_status!(b::Board)
+    fill!(b.final_status, GO_UNKNOWN)
+    for i in 1:b.size, j in 1:b.size
+        b[i, j] == GO_EMPTY || continue
+        for k in 1:4
+            ai, aj = go_neighbor(i, j, k)
+            on_board(b, ai, aj) || continue
+            pos = ij2pos(b, ai, aj)
+            if b.final_status[ai, aj] == GO_UNKNOWN && b[ai, aj] != GO_EMPTY
+                set_final_status_string!(b, pos, has_additional_liberty(b, ai, aj, i, j) ? GO_ALIVE : GO_DEAD)
+            end
+            if b.final_status[i, j] == GO_UNKNOWN
+                b.final_status[i, j] = xor(b.final_status[ai, aj] == GO_ALIVE, b[ai, aj] == GO_WHITE) ?
+                                       GO_BLACK_TERRITORY : GO_WHITE_TERRITORY
+            end
+        end
+    end
+end
+function generate_move(b::Board, color::Int)
+    moves = zeros(Int, 2, b.size * b.size)
+    n = 0
+    for ai in 1:b.size, aj in 1:b.size
+        if legal_move(b, ai, aj, color) && !suicide(b, ai, aj, color)
+            if !suicide(b, ai, aj, other_color(color))
+                n += 1
+                moves[:, n] = [ai, aj]
+            else
+                # Suicide for the opponent, but considered if it captures
+                for k in 1:4
+                    bi, bj = go_neighbor(ai, aj, k)
+                    if on_board(b, bi, bj) && b[bi, bj] == other_color(color)
+                        n += 1
+                        moves[:, n] = [ai, aj]
+                        break
+                    end
+                end
+            end
+        end
+    end
+    n == 0 && return (0, 0)
+    m = 1 + xor_randn!(b.rng, n)
+    return (moves[1, m], moves[2, m])
+end
+function compute_score(b::Board)
+    score = b.komi
+    compute_final_status!(b)
+    for i in 1:b.size, j in 1:b.size
+        status = b.final_status[i, j]
+        if status == GO_BLACK_TERRITORY
+            score -= 1.0
+        elseif status == GO_WHITE_TERRITORY
+            score += 1.0
+        elseif xor(status == GO_ALIVE, b[i, j] == GO_WHITE)
+            score -= 1.0
+        else
+            score += 1.0
+        end
+    end
+    return score
+end
+go_game_setup() = Board(9)
+# One game from each point of the first column
+function go_game(b)
+    b.rng.state = UInt32(1)
+    white_wins = 0
+    for i in 1:b.size
+        passes = 0
+        nmoves = 1
+        color = GO_WHITE
+        fill!(b.board, GO_EMPTY)
+        play_move!(b, i, 1, GO_BLACK)
+        while passes < 3 && nmoves < 600
+            mi, mj = generate_move(b, color)
+            play_move!(b, mi, mj, color)
+            passes = is_pass_move(mi, mj) ? passes + 1 : 0
+            nmoves += 1
+            color = other_color(color)
+        end
+        white_wins += passes == 3 && compute_score(b) > 0
+    end
+    return white_wins, b
+end
+bench(go_game, go_game_setup; ops = 9)
+
+# Seismic simulation, ported from BaseBenchmarks' "seismic": finite-difference
+# time-domain updates on a staggered 2-D grid, @simd inner loops over five Float32 arrays
+# with neighbor offsets in both dimensions. The fields restart from the same state
+# before every sample.
+function update_v!(U, Vx, Vy, A)
+    m, n = size(U)
+    for j in 2:n-1
+        @simd for i in 2:m-1
+            @inbounds begin
+                Vx[i, j] += (A[i, j+1] + A[i, j]) * (U[i, j+1] - U[i, j])
+                Vy[i, j] += (A[i+1, j] + A[i, j]) * (U[i+1, j] - U[i, j])
+            end
+        end
+    end
+end
+function update_u!(U, Vx, Vy, B)
+    m, n = size(U)
+    for j in 2:n-1
+        @simd for i in 2:m-1
+            @inbounds U[i, j] += B[i, j] * ((Vx[i, j] - Vx[i, j-1]) + (Vy[i, j] - Vy[i-1, j]))
+        end
+    end
+end
+function seismic_fdtd_setup()
+    U, Vx, Vy, A, B, U0 = map(v -> reshape(v, 200, 200), carve(Float32, 200 * 200, 6))
+    fill!(A, 0.2f0)
+    fill!(B, 0.25f0)
+    U0 .= reshape(rand_f32(SplitMix(87), 200 * 200, -0.5, 0.5), 200, 200)
+    return U, Vx, Vy, A, B, U0
+end
+function seismic_fdtd(U, Vx, Vy, A, B, _)
+    for _ in 1:10
+        update_v!(U, Vx, Vy, A)
+        update_u!(U, Vx, Vy, B)
+    end
+    return U
+end
+bench(seismic_fdtd, seismic_fdtd_setup; ops = 10 * 198^2,
+      reset = (U, Vx, Vy, A, B, U0) -> (copyto!(U, U0); fill!(Vx, 0); fill!(Vy, 0)))
+
+# Actor centrality, ported from BaseBenchmarks' "imdb" (#1163) onto a generated graph:
+# tab-separated lines split into a graph of mutable nodes whose neighbor Sets hash them
+# by identity, then breadth-first searches over names through Set{String} and Dict
+mutable struct IMDBNode
+    name::String
+    neighbors::Set{IMDBNode}
+end
+IMDBNode(name::AbstractString) = IMDBNode(String(name), Set{IMDBNode}())
+fetch_node!(G, name) = get!(() -> IMDBNode(name), G, name)
+function imdb_setup()
+    r = SplitMix(88)
+    actors = ["Actor $(k), Name ($(k % 7))" for k in 1:1500]
+    films = ["Film $(k)" for k in 1:2500]
+    return [string(actors[a], '\t', films[f], '\t', 1950 + f % 70)
+            for (a, f) in zip(rand_int(r, 6000, 1, 1500), rand_int(r, 6000, 1, 2500))]
+end
+function centrality_mean(G, start)
+    distances = Dict{String,Int}()
+    next_names = Set{String}([start])
+    d = 0
+    while !isempty(next_names)
+        neighbor_names = Set{String}()
+        for name in next_names
+            if !haskey(distances, name)
+                distances[name] = d
+                for node in G[name].neighbors
+                    push!(neighbor_names, node.name)
+                end
+            end
+        end
+        d += 1
+        next_names = neighbor_names
+    end
+    return sum(values(distances)) / length(distances)
+end
+function imdb(lines)
+    G = Dict{String,IMDBNode}()
+    actor_names = Set{String}()
+    for l in lines
+        k = split(strip(l), '\t')
+        actor = fetch_node!(G, k[1])
+        movie = fetch_node!(G, join(k[2:3], "_"))
+        push!(actor_names, actor.name)
+        push!(actor.neighbors, movie)
+        push!(movie.neighbors, actor)
+    end
+    return G, [centrality_mean(G, a) for a in first(sort!(collect(actor_names)), 4)]
+end
+bench(imdb, imdb_setup; ops = 6000)
+
 end
