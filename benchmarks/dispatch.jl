@@ -69,16 +69,17 @@ function union_return_abi(xs)
 end
 bench(union_return_abi, union_return_abi_setup; ops = 2^16)
 
-# Fully dynamic arithmetic with boxing: Vector{Any} and an untyped accumulator
-any_arith_setup() = Any[isodd(i) ? i : Float64(i) for i in rand_int(SplitMix(3), 2^15, 1, 1000)]
-function any_arith(xs)
+# Fully dynamic arithmetic with boxing: Vector{Any} and an untyped accumulator. The
+# elements are reshuffled every sample.
+any_arith_setup() = (Any[isodd(i) ? i : Float64(i) for i in rand_int(SplitMix(3), 2^15, 1, 1000)], SplitMix(203))
+function any_arith(xs, _)
     s = 0
     for x in xs
         s = s + x * 2
     end
     return s
 end
-bench(any_arith, any_arith_setup; ops = 2^15, tolerance = 0.06)
+bench(any_arith, any_arith_setup; ops = 2^15, tolerance = 0.06, reset = (xs, r) -> shuffle_det!(r, xs))
 
 # A captured variable that is reassigned becomes a Core.Box; lowering decides this
 boxed_closure_setup() = rand_f64(SplitMix(4), 2^16)
@@ -92,35 +93,41 @@ function boxed_closure(xs)
 end
 bench(boxed_closure, boxed_closure_setup; ops = 2^16)
 
-# Keyword calls with runtime keyword sets: kwcall, NamedTuple merging, the kwsorter
+# Keyword calls with runtime keyword sets: kwcall, NamedTuple merging, the kwsorter. The
+# (value, keyword set) pairs are reshuffled every sample.
 function kwcall_dynamic_setup()
     r = SplitMix(5)
     kws = Any[(; scale = 2.0), (; shift = 1.0), (; scale = 0.5, flip = true), (;), (; flip = false, shift = -1.0)]
-    return rand_f64(r, 2^14), kws, rand_int(r, 2^14, 1, 5)
+    xs, which = carve(Float64 => 2^14, Int => 2^14)
+    xs .= rand_f64(r, 2^14)
+    which .= rand_int(r, 2^14, 1, 5)
+    return xs, kws, which, SplitMix(205)
 end
 kwf(x; scale = 1.0, shift = 0.0, flip::Bool = false) = (flip ? -x : x) * scale + shift
-function kwcall_dynamic(xs, kws, which)
+function kwcall_dynamic(xs, kws, which, _)
     s = 0.0
     for i in eachindex(xs, which)
         s += kwf(xs[i]; kws[which[i]]...)
     end
     return s
 end
-bench(kwcall_dynamic, kwcall_dynamic_setup; ops = 2^14, tolerance = 0.06)
+bench(kwcall_dynamic, kwcall_dynamic_setup; ops = 2^14, tolerance = 0.06,
+      reset = (xs, kws, which, r) -> shuffle_det!(r, xs, which))
 
-# Splatting runtime-length collections goes through Core._apply_iterate
+# Splatting runtime-length collections goes through Core._apply_iterate. The vectors are
+# reshuffled every sample, so the lengths do not repeat in a learnable order.
 function splat_dynamic_setup()
     r = SplitMix(6)
-    return [rand_f64(r, n) for n in rand_int(r, 2^13, 1, 8)]
+    return [rand_f64(r, n) for n in rand_int(r, 2^13, 1, 8)], SplitMix(206)
 end
-function splat_dynamic(vs)
+function splat_dynamic(vs, _)
     s = 0.0
     for v in vs
         s += max(v...) + +(0.0, v...)
     end
     return s
 end
-bench(splat_dynamic, splat_dynamic_setup; ops = 2^13, tolerance = 0.06)
+bench(splat_dynamic, splat_dynamic_setup; ops = 2^13, tolerance = 0.06, reset = (vs, r) -> shuffle_det!(r, vs))
 
 # invokelatest: the world-age escape hatch used by REPL, callbacks and plugins
 invokelatest_calls_setup() = rand_f64(SplitMix(7), 2^14)
@@ -199,14 +206,16 @@ function dynamic_ctor_setup()
     r = SplitMix(37)
     vals = Any[1, 2.0, "s", true, 'c', 0x01, Int32(3), 1.5f0]
     xs = Any[vals[k] for k in rand_int(r, 2^14, 1, 8)]
-    return xs, similar(xs)
+    return xs, similar(xs), SplitMix(237)
 end
-function dynamic_ctor(xs, out)
+# The values are reshuffled every sample, so the constructed type does not repeat in a
+# learnable order
+function dynamic_ctor(xs, out, _)
     for i in eachindex(xs, out)
         out[i] = Box(xs[i])
     end
     return out
 end
-bench(dynamic_ctor, dynamic_ctor_setup; ops = 2^14, tolerance = 0.06)
+bench(dynamic_ctor, dynamic_ctor_setup; ops = 2^14, tolerance = 0.06, reset = (xs, out, r) -> shuffle_det!(r, xs))
 
 end

@@ -21,35 +21,37 @@ function pairs_input(seed)
     n = length(TYPES)
     return [(TYPES[i], TYPES[j]) for (i, j) in zip(rand_int(r, 4096, 1, n), rand_int(r, 4096, 1, n))]
 end
+# Every benchmark below reshuffles its queries before each sample (`reset`), so the
+# sequence of fast and slow paths is not one the branch predictor has learned
 # End of the shared part.
 
-subtype_setup() = pairs_input(1)
-function subtype(ps)
+subtype_setup() = (pairs_input(1), SplitMix(301))
+function subtype(ps, _)
     n = 0
     for (a, b) in ps
         n += (a <: b) + (b <: a)
     end
     return n
 end
-bench(subtype, subtype_setup; ops = 4096)
+bench(subtype, subtype_setup; ops = 4096, reset = (ps, r) -> shuffle_det!(r, ps))
 
-typeintersect_pairs_setup() = pairs_input(2)
-function typeintersect_pairs(ps)
+typeintersect_pairs_setup() = (pairs_input(2), SplitMix(302))
+function typeintersect_pairs(ps, _)
     n = 0
     for (a, b) in ps
         n += typeintersect(a, b) === Union{}
     end
     return n
 end
-bench(typeintersect_pairs, typeintersect_pairs_setup; ops = 4096)
+bench(typeintersect_pairs, typeintersect_pairs_setup; ops = 4096, reset = (ps, r) -> shuffle_det!(r, ps))
 
 # apply_type with cache hits: the parameters vary, the types already exist
 function apply_type_setup()
     r = SplitMix(3)
     elts = Any[Int, Float64, String, Symbol, Nothing, Any, Int8, ComplexF64]
-    return [(elts[i], j) for (i, j) in zip(rand_int(r, 4096, 1, 8), rand_int(r, 4096, 1, 6))]
+    return [(elts[i], j) for (i, j) in zip(rand_int(r, 4096, 1, 8), rand_int(r, 4096, 1, 6))], SplitMix(303)
 end
-function apply_type(ps)
+function apply_type(ps, _)
     n = 0
     for (T, k) in ps
         n += isconcretetype(Vector{T}) + isconcretetype(NTuple{k,T}) + isconcretetype(Dict{Symbol,T}) +
@@ -57,16 +59,18 @@ function apply_type(ps)
     end
     return n
 end
-bench(apply_type, apply_type_setup; ops = 4096)
+bench(apply_type, apply_type_setup; ops = 4096, reset = (ps, r) -> shuffle_det!(r, ps))
 
-# Method table matching (jl_matching_methods), as reflection and inference do it
+# Method table matching (jl_matching_methods) and hasmethod, as reflection and inference
+# do it, including building each signature
 function method_lookup_setup()
     r = SplitMix(4)
     fs = Any[+, *, getindex, convert, show, length, iterate, ==]
     args = Any[Int, Float64, Vector{Int}, String, Any, Missing, Dict{Int,Int}, Tuple{Int,Int}]
-    return [(fs[i], Tuple{args[j], args[k]}) for (i, j, k) in zip(rand_int(r, 1536, 1, 8), rand_int(r, 1536, 1, 8), rand_int(r, 1536, 1, 8))]
+    return [(fs[i], Tuple{args[j], args[k]}) for (i, j, k) in zip(rand_int(r, 1536, 1, 8), rand_int(r, 1536, 1, 8), rand_int(r, 1536, 1, 8))],
+           SplitMix(304)
 end
-function method_lookup(qs)
+function method_lookup(qs, _)
     n = 0
     for (f, tt) in qs
         ms = Base._methods_by_ftype(Tuple{typeof(f), tt.parameters...}, 4, Base.get_world_counter())
@@ -75,17 +79,17 @@ function method_lookup(qs)
     end
     return n
 end
-bench(method_lookup, method_lookup_setup; ops = 1536)
+bench(method_lookup, method_lookup_setup; ops = 1536, reset = (qs, r) -> shuffle_det!(r, qs))
 
 # Type printing, alias search included: error messages, the REPL, stack traces
-show_types_setup() = TYPES
-function show_types(ts)
-    n = 0
-    for T in ts
-        n += sizeof(string(T)) + sizeof(sprint(show, Vector{T}))
+show_types_setup() = (copy(TYPES), Vector{String}(undef, 2 * length(TYPES)), SplitMix(305))
+function show_types(ts, out, _)
+    for (i, T) in enumerate(ts)
+        out[2i-1] = string(T)
+        out[2i] = sprint(show, Vector{T})
     end
-    return n
+    return out
 end
-bench(show_types, show_types_setup; ops = length(TYPES))
+bench(show_types, show_types_setup; ops = length(TYPES), reset = (ts, out, r) -> shuffle_det!(r, ts))
 
 end

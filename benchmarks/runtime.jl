@@ -51,16 +51,17 @@ end
 function egal_hash_setup()
     r = SplitMix(3)
     ks = [Key("k$(i % 500)", Symbol("t", i % 7), (i % 13, i % 17), (i % 5) / 4) for i in rand_int(r, 2^14, 1, 10^6)]
-    return ks, circshift(ks, 1)
+    return ks, circshift(ks, 1), SplitMix(103)
 end
-function egal_hash(a, b)
+# The pairs are reshuffled every sample, together
+function egal_hash(a, b, _)
     n = UInt(0)
     for i in eachindex(a)
         n += (a[i] === b[i]) + isequal(a[i], b[i]) + hash(a[i]) % 4
     end
     return n
 end
-bench(egal_hash, egal_hash_setup; ops = 2^14)
+bench(egal_hash, egal_hash_setup; ops = 2^14, reset = (a, b, r) -> shuffle_det!(r, a, b))
 
 # deepcopy walks objects by reflection and tracks identity in an IdDict
 mutable struct Node
@@ -78,10 +79,12 @@ function deepcopy_tree_setup()
         push!(parent.children, c)
         push!(nodes, c)
     end
-    return root
+    return root, nodes, SplitMix(104)
 end
-deepcopy_tree(root) = deepcopy(root)
-bench(deepcopy_tree, deepcopy_tree_setup; ops = 2001)
+# Every node's children are reordered before each sample, so the walk differs
+deepcopy_tree(root, _, _) = deepcopy(root)
+bench(deepcopy_tree, deepcopy_tree_setup; ops = 2001,
+      reset = (root, nodes, r) -> foreach(n -> shuffle_det!(r, n.children), nodes))
 
 # Untyped and typed globals: binding lookup and world-age partitions on every access
 global untyped_counter = 0
@@ -166,13 +169,14 @@ mutable struct WithConst{S<:Tuple}
     const cols::S
 end
 @noinline bump!(c::Vector{Float64}) = (@inbounds c[1] += 1.0; nothing)
-const_field_roots_setup() = (WithConst(ntuple(_ -> zeros(1), 64)), rand_int(SplitMix(43), 2^14, 1, 64))
-function const_field_roots(s, ks)
+const_field_roots_setup() = (WithConst(ntuple(_ -> zeros(1), 64)), rand_int(SplitMix(43), 2^14, 1, 64), SplitMix(143))
+# The field choices are reshuffled every sample
+function const_field_roots(s, ks, _)
     for k in ks
         Base.Cartesian.@nexprs 64 i -> i == k && bump!(s.cols[i])
     end
     return s.cols[1][1]
 end
-bench(const_field_roots, const_field_roots_setup; ops = 2^14)
+bench(const_field_roots, const_field_roots_setup; ops = 2^14, reset = (s, ks, r) -> shuffle_det!(r, ks))
 
 end

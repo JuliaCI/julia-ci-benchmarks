@@ -109,19 +109,22 @@ end
 sort_by_tuple(v, x) = sort!(v; by = last, rev = true)
 bench(sort_by_tuple, sort_by_tuple_setup; ops = 2^16, reset = (v, x) -> copyto!(v, x))
 
-# Random queries keep the binary search's branches unpredictable
+# Random queries, reshuffled every sample, keep the binary search's branches unpredictable
 function searchsorted_random_setup()
     r = SplitMix(9)
-    return sort!(rand_f64(r, 2^20)), rand_f64(r, 2^14)
+    hay, q = carve(Float64 => 2^20, Float64 => 2^14)
+    hay .= sort!(rand_f64(r, 2^20))
+    q .= rand_f64(r, 2^14)
+    return hay, q, SplitMix(109)
 end
-function searchsorted_random(hay, q)
+function searchsorted_random(hay, q, _)
     s = 0
     for x in q
         s += searchsortedfirst(hay, x)
     end
     s
 end
-bench(searchsorted_random, searchsorted_random_setup; ops = 2^14)
+bench(searchsorted_random, searchsorted_random_setup; ops = 2^14, reset = (hay, q, r) -> shuffle_det!(r, q))
 
 function bitarray_ops_setup()
     r = SplitMix(10)
@@ -129,7 +132,9 @@ function bitarray_ops_setup()
 end
 function bitarray_ops(a, b)
     c = a .& .!b
-    count(c) + count(a .⊻ b) + length(findall(c))
+    d = a .⊻ b
+    f = findall(c)
+    return count(c) + count(d) + length(f), c, d, f
 end
 bench(bitarray_ops, bitarray_ops_setup; ops = 2^20)
 
@@ -224,11 +229,15 @@ bench(reinterpret_records, reinterpret_records_setup; ops = 2^17)
 
 # Assignment into 2-D views with UnitRange indices, by broadcast and by copyto!: SubArray
 # copyto_unaliased! and in-place broadcast lost vectorization twice in 1.11 (#53158, #53615)
-subarray_assign_setup() = (zeros(257, 257), reshape(rand_f64(SplitMix(23), 256^2), 256, 256))
+function subarray_assign_setup()
+    B, A = carve(Float64 => 257^2, Float64 => 256^2)
+    A .= rand_f64(SplitMix(23), 256^2)
+    return reshape(B, 257, 257), reshape(A, 256, 256)
+end
 function subarray_assign(B, A)
     B[1:end-1, 1:end-1] .= A
     copyto!(view(B, 2:size(B, 1), 2:size(B, 2)), A)
-    return B[2, 2]
+    return B
 end
 bench(subarray_assign, subarray_assign_setup; ops = 2 * 256^2)
 
@@ -257,7 +266,7 @@ function reduce_dims(A)
     b = sum(abs2, A; dims = 2)
     c = sum(A; dims = 3)
     d = maximum(A; dims = (1, 3))
-    return a[1] + b[1] + c[1] + d[1]
+    return a, b, c, d
 end
 bench(reduce_dims, reduce_dims_setup; ops = 4 * 64 * 64 * 32)
 
@@ -271,7 +280,7 @@ end
 function logical_index(x, m, bm)
     a = x[m]
     b = x[bm]
-    return length(a) + length(b) + length(findall(m)) + sum(view(x, bm))
+    return a, b, findall(m), sum(view(x, bm))
 end
 bench(logical_index, logical_index_setup; ops = 4 * 2^16, tolerance = 0.08)
 
@@ -284,8 +293,7 @@ function missing_ops_setup()
 end
 function missing_ops(a, b)
     c = map(*, a, b)
-    return sum(skipmissing(a)) + length(collect(skipmissing(c))) + count(ismissing, c) +
-           length(filter(x -> x > 0.5f0, skipmissing(b)))
+    return sum(skipmissing(a)) + count(ismissing, c), c, collect(skipmissing(c)), filter(x -> x > 0.5f0, skipmissing(b))
 end
 bench(missing_ops, missing_ops_setup; ops = 4 * 2^16)
 

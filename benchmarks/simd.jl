@@ -96,9 +96,10 @@ bench(count_bytes, count_bytes_setup; ops = 2^20)
 # Indexed loads that cannot vectorize on most targets: the scalar-loop quality baseline
 function gather_index_setup()
     r = SplitMix(12)
-    (x,) = carve(2^16, Float64)
+    x, idx = carve(Float64 => 2^16, Int => 2^18)
     x .= rand_f64(r, 2^16)
-    return x, rand_int(r, 2^18, 1, 2^16)
+    idx .= rand_int(r, 2^18, 1, 2^16)
+    return x, idx
 end
 function gather_index(x, idx)
     s = 0.0

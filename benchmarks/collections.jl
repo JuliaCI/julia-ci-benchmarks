@@ -34,18 +34,18 @@ function dict_string_count(words)
     for w in words
         d[w] = get(d, w, 0) + 1
     end
-    length(d)
+    return d
 end
 bench(dict_string_count, dict_string_count_setup; ops = 2^16)
 
 # Untyped keys and values, as in much of Base and package internals: every hash and
-# isequal is a dynamic call
+# isequal is a dynamic call. The keys are reshuffled every sample.
 function dict_any_setup()
     r = SplitMix(3)
     pool = Any[1, 2.5, "x", :y, (1, 2), 'c', 0x05, 1 // 3, nothing, [1]]
-    return Any[i % 3 == 0 ? string(i) : i % 3 == 1 ? i : Float64(i) for i in rand_int(r, 2^15, 1, 2^16)], pool
+    return Any[i % 3 == 0 ? string(i) : i % 3 == 1 ? i : Float64(i) for i in rand_int(r, 2^15, 1, 2^16)], pool, SplitMix(103)
 end
-function dict_any(ks, pool)
+function dict_any(ks, pool, _)
     d = Dict{Any,Any}()
     for (i, k) in enumerate(ks)
         d[k] = pool[1 + i % length(pool)]
@@ -56,7 +56,7 @@ function dict_any(ks, pool)
     end
     s
 end
-bench(dict_any, dict_any_setup; ops = 2^15)
+bench(dict_any, dict_any_setup; ops = 2^15, reset = (ks, pool, r) -> shuffle_det!(r, ks))
 
 # Deletion and reinsertion at a fixed population: tombstones, probing past deleted slots
 # and the rehash that clears them. Reset rebuilds the Dict, so every sample starts alike.
@@ -77,11 +77,10 @@ function dict_delete_churn(box, ks)
 end
 bench(dict_delete_churn, dict_delete_churn_setup; ops = 2^16, reset = (box, ks) -> (box[] = Dict(k => k for k in ks)))
 
-# IdDict lives in the C runtime (eqtable), keyed by object identity
-function iddict_setup()
-    return [Ref(i) for i in 1:2^15]
-end
-function iddict(objs)
+# IdDict lives in the C runtime (eqtable), keyed by object identity. The objects are
+# reshuffled every sample; the lookups box `i`, which accounts for most allocations.
+iddict_setup() = ([Ref(i) for i in 1:2^15], SplitMix(104))
+function iddict(objs, _)
     d = IdDict{Any,Int}()
     for (i, o) in enumerate(objs)
         d[o] = i
@@ -92,7 +91,7 @@ function iddict(objs)
     end
     s
 end
-bench(iddict, iddict_setup; ops = 2^15)
+bench(iddict, iddict_setup; ops = 2^15, reset = (objs, r) -> shuffle_det!(r, objs))
 
 function set_ops_setup()
     r = SplitMix(4)
@@ -100,7 +99,7 @@ function set_ops_setup()
 end
 function set_ops(a, b)
     sa, sb = Set(a), Set(b)
-    length(union(sa, sb)) + length(intersect(sa, sb)) + length(setdiff(sa, sb)) + length(unique(a))
+    return union(sa, sb), intersect(sa, sb), setdiff(sa, sb), unique(a)
 end
 bench(set_ops, set_ops_setup; ops = 2^17)
 
@@ -136,7 +135,7 @@ function findall_tuples_setup()
     v = rand_int(SplitMix(38), 7 * 2^16, 1, 64)
     return [ntuple(j -> v[7(i-1)+j], 7) for i in 1:2^16]
 end
-findall_tuples(v) = length(findall(has_one, v))
+findall_tuples(v) = findall(has_one, v)
 bench(findall_tuples, findall_tuples_setup; ops = 2^16)
 
 # Reductions with init=, which take the mapfoldl path, including over zip with a view
@@ -147,16 +146,18 @@ reduce_init(v, w) = reduce(max, v; init = 0.0) + sum(x -> 4 / (4x - 3), v; init 
 bench(reduce_init, reduce_init_setup; ops = 3 * 2^17)
 
 # collect and map whose element type is only known at runtime: the eltype widens partway
-# through (setindex_widen_up_to)
+# through (setindex_widen_up_to). All but the first few elements are reshuffled every
+# sample, so the widening happens at the same place.
 function collect_widen_setup()
     r = SplitMix(40)
-    return Any[k == 1 ? 1.5 : k for k in rand_int(r, 2^15, 1, 4)]
+    return Any[1, 2, 1.5, (k == 1 ? 1.5 : k for k in rand_int(r, 2^16, 1, 4))...], SplitMix(140)
 end
-function collect_widen(xs)
+function collect_widen(xs, _)
     a = [x + 1 for x in xs]
     b = map(x -> x isa Int ? nothing : x, xs)
-    return length(a) + length(b) + count(isnothing, b)
+    return a, b
 end
-bench(collect_widen, collect_widen_setup; ops = 2 * 2^15, tolerance = 0.06)
+bench(collect_widen, collect_widen_setup; ops = 2 * 2^16, tolerance = 0.06,
+      reset = (xs, r) -> shuffle_det!(r, view(xs, 4:length(xs))))
 
 end

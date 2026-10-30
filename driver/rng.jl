@@ -22,17 +22,24 @@ rand_f32(r::SplitMix, n::Integer, lo::Real = 0.0, hi::Real = 1.0) =
 rand_int(r::SplitMix, n::Integer, lo::Integer, hi::Integer) =
     [lo + Int(next!(r) % UInt64(hi - lo + 1)) for _ in 1:n]
 
-function shuffle_det!(r::SplitMix, v::AbstractVector)
+# Several vectors of one length are shuffled with the same permutation, so pairs stay
+# together. In a `reset`, this gives every sample the same work in an order the branch
+# predictor has not learned.
+function shuffle_det!(r::SplitMix, v::AbstractVector, vs::AbstractVector...)
     for i in length(v):-1:2
         j = 1 + Int(next!(r) % UInt64(i))
         v[i], v[j] = v[j], v[i]
+        for w in vs
+            w[i], w[j] = w[j], w[i]
+        end
     end
     return v
 end
 
 """
-    carve(n, T1, T2, ...) -> (v1::Vector{T1}, v2::Vector{T2}, ...)
-    carve(T, n, k)        -> (v1, ..., vk)
+    carve(n, T1, T2, ...)         -> (v1::Vector{T1}, v2::Vector{T2}, ...)
+    carve(T, n, k)                -> (v1, ..., vk)
+    carve(T1 => n1, T2 => n2, ...) -> vectors of different lengths
 
 Vectors of `n` elements cut from one allocation at fixed offsets. Kernels that stream
 several arrays are sensitive to where the arrays lie relative to each other (cache-set
@@ -40,14 +47,18 @@ and 4K-aliasing conflicts, worst for power-of-two sizes), and separate allocatio
 differently in every process: up to 7x in cycles with identical instructions. The vectors
 are zeroed. Their buffer is kept alive by the driver for the life of the process.
 """
-function carve(n::Integer, Ts::Type...)
+carve(n::Integer, Ts::Type...) = carve(map(T -> T => Int(n), Ts)...)
+function carve(specs::Pair{<:Type,<:Integer}...)
     # Each vector starts on a page boundary plus a different multiple of 192 bytes
-    sizes = [cld(n * sizeof(T), 4096) * 4096 + 192 for T in Ts]
+    sizes = [cld(n * sizeof(T), 4096) * 4096 + 192 for (T, n) in specs]
     buf = zeros(UInt8, sum(sizes) + 4096)
     skip = (4096 - Int(UInt(pointer(buf)) % 4096)) % 4096
     offsets = cumsum([skip; sizes[1:end-1]])
     push!(CARVED, buf)
-    return ntuple(j -> fill!(unsafe_wrap(Array, Ptr{Ts[j]}(pointer(buf, 1 + offsets[j])), n), zero(Ts[j])), length(Ts))
+    return ntuple(length(specs)) do j
+        T, n = specs[j]
+        fill!(unsafe_wrap(Array, Ptr{T}(pointer(buf, 1 + offsets[j])), Int(n)), zero(T))
+    end
 end
 const CARVED = Vector{UInt8}[]
 carve(::Type{T}, n::Integer, k::Integer) where {T} = carve(n, ntuple(_ -> T, k)...)

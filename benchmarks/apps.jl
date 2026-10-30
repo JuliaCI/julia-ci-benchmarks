@@ -52,15 +52,15 @@ function mandel(c::ComplexF64, maxit)
 end
 function mandelbrot()
     s = 0
-    for j in 1:150, i in 1:200
-        s += mandel(complex(-2.2 + 3.0 * i / 200, -1.2 + 2.4 * j / 150), 80)
+    for j in 1:256, i in 1:256
+        s += mandel(complex(-2.2 + 3.0 * i / 256, -1.2 + 2.4 * j / 256), 80)
     end
     s
 end
-bench(mandelbrot; ops = 200 * 150)
+bench(mandelbrot; ops = 256 * 256)
 
 # Spectral norm: an implicitly defined matrix, integer-to-float conversions, dot products
-spectralnorm_setup() = (ones(200), zeros(200), zeros(200))
+spectralnorm_setup() = carve(Float64, 200, 3)
 A(i, j) = 1.0 / ((i + j) * (i + j + 1) / 2 + i + 1)
 function Av!(y, x)
     n = length(x)
@@ -151,12 +151,20 @@ function fannkuch_count(n)
         end
     end
 end
-fannkuch() = fannkuch_count(8)
-bench(fannkuch; ops = factorial(8))
+fannkuch() = fannkuch_count(9)
+bench(fannkuch; ops = factorial(9))
 
 # A JSON parser over UInt8s into Dict{String,Any}/Vector{Any}: type-unstable values,
 # string building, recursion
-json_parse_setup() = Vector{UInt8}(gen_json(SplitMix(2), 10))
+# An array of documents, about 128 KiB of text
+function json_parse_setup()
+    r = SplitMix(2)
+    docs = String[]
+    while sum(sizeof, docs; init = 0) < 2^17
+        push!(docs, gen_json(r, 8))
+    end
+    return Vector{UInt8}("[" * join(docs, ",") * "]")
+end
 function gen_json(r, depth)
     k = Driver.next!(r) % 6
     depth == 0 && (k = k % 3)
@@ -218,7 +226,7 @@ function jparse(b::Vector{UInt8}, i::Int)
 end
 function json_parse(b)
     v, _ = jparse(b, 1)
-    length(v)
+    return v
 end
 bench(json_parse, json_parse_setup)
 
@@ -413,7 +421,7 @@ function csv_parse(s)
         push!(city, get!(pool, f[4], length(pool) + 1))
         push!(flag, f[5] == "true")
     end
-    return sum(price) + sum(skipmissing(qty)) + count(flag) + length(pool) + city[end]
+    return (; ids, price, qty, city, flag, pool)
 end
 bench(csv_parse, csv_parse_setup; ops = 4096)
 
@@ -503,9 +511,12 @@ bench(ray_tracer, ray_tracer_setup; ops = 64 * 48)
 # (distance, vertex) tuples and lazy deletion
 function dijkstra_setup()
     r = SplitMix(12)
-    n, deg = 2^13, 6
-    offs = collect(1:deg:n*deg+1)
-    return offs, rand_int(r, n * deg, 1, n), rand_f64(r, n * deg, 0.1, 10.0), zeros(n), sizehint!(Tuple{Float64,Int}[], n * deg)
+    n, deg = 2^14, 6
+    offs, dst, w, dist = carve(Int => n + 1, Int => n * deg, Float64 => n * deg, Float64 => n)
+    offs .= 1:deg:n*deg+1
+    dst .= rand_int(r, n * deg, 1, n)
+    w .= rand_f64(r, n * deg, 0.1, 10.0)
+    return offs, dst, w, dist, sizehint!(Tuple{Float64,Int}[], n * deg)
 end
 function heap_push!(h, x)
     push!(h, x)
@@ -556,7 +567,7 @@ function dijkstra(offs, dst, w, dist, heap)
     end
     return sum(x -> isfinite(x) ? x : 0.0, dist)
 end
-bench(dijkstra, dijkstra_setup; ops = 6 * 2^13)
+bench(dijkstra, dijkstra_setup; ops = 6 * 2^14)
 
 # LZ77-style compression of generated text and decompression back: a hash table of
 # recent positions, byte-wise match extension, varint-coded tokens
@@ -644,12 +655,17 @@ bench(lz_roundtrip, lz_setup; ops = 12000, tolerance = 0.06)
 
 # Group-by aggregation as data-frame code does it: sortperm on a key column, runs of
 # equal keys, per-group statistics over views, results in a Dict
+# The rows are reshuffled every sample, together
 function groupby_setup()
     r = SplitMix(14)
-    n = 2^15
-    return rand_int(r, n, 1, 600), rand_f64(r, n, -1, 1), rand_f64(r, n, 0.5, 2)
+    n = 2^16
+    keys, vals, wts = carve(Int => n, Float64 => n, Float64 => n)
+    keys .= rand_int(r, n, 1, 600)
+    vals .= rand_f64(r, n, -1, 1)
+    wts .= rand_f64(r, n, 0.5, 2)
+    return keys, vals, wts, SplitMix(114)
 end
-function groupby_aggregate(keys, vals, wts)
+function groupby_aggregate(keys, vals, wts, _)
     p = sortperm(keys)
     ks, vs, ws = keys[p], vals[p], wts[p]
     res = Dict{Int,NTuple{3,Float64}}()
@@ -665,9 +681,9 @@ function groupby_aggregate(keys, vals, wts)
         res[ks[i]] = (m, sqrt(sum(x -> (x - m)^2, v) / length(v)), sum(v .* w) / sum(w))
         i = j + 1
     end
-    return sum(t -> t[1] + t[2] + t[3], values(res))
+    return res
 end
-bench(groupby_aggregate, groupby_setup; ops = 2^15)
+bench(groupby_aggregate, groupby_setup; ops = 2^16, reset = (k, v, w, r) -> shuffle_det!(r, k, v, w))
 
 # SHA-256 over 64 KiB: 32-bit rotates and adds, the message schedule in a small vector,
 # eight words of state carried through the rounds

@@ -49,7 +49,7 @@ const BIG_SRC = large_function_src()
 # End of the shared part.
 
 parse_file_setup() = SRC
-parse_file(src) = length(Meta.parseall(src).args)
+parse_file(src) = Meta.parseall(src)
 bench(parse_file, parse_file_setup; ops = sizeof(SRC))
 
 # The Ref holds the module to lower into, which reset makes fresh: lower_file(ex, Ref(fresh_module()))

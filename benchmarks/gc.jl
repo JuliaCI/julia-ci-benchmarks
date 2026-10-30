@@ -114,7 +114,7 @@ function bigint()
         a, b = b, a + b
         b = b * 3 ÷ 2 + 1
     end
-    return ndigits(b)
+    return b
 end
 bench(bigint; ops = 400, metric = "time", tolerance = 0.08)
 

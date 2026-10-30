@@ -94,7 +94,7 @@ do not explain (the same direction, at least half the size) must exceed 15%, whi
 cleared all five pairs; a change with an instruction change behind it keeps the
 benchmark's own tolerance. Runtime dispatch goes through a call cache keyed on the
 caller's address, so the dynamic-dispatch kernels move a few percent in instructions as
-well and use 6%. A comparison of two builds takes about 8 minutes on the M4 Pro.
+well and use 6%. A comparison of two builds takes about 8.5 minutes on the M4 Pro.
 
 **Inference is judged on instructions.** The `inference` category (ported from
 BaseBenchmarks: an `AbstractInterpreter` with its own cache infers whole call graphs,

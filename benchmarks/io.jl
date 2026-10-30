@@ -14,7 +14,7 @@ function iobuffer_print(is, fs)
         print(io, fs[i])
         print(io, "\t:sym\ttext\n")
     end
-    return position(io)
+    return io
 end
 bench(iobuffer_print, iobuffer_print_setup; ops = 8192)
 
