@@ -12,14 +12,17 @@
 # missing blocks or blocks that differ between arms; a skipped benchmark (`min_threads`)
 # is not incomplete.
 #
-# Per benchmark, arm and block the value is the minimum over samples of the benchmark's
-# metric: cycles of the calling thread, or wall time for work that leaves it. A benchmark
+# Per benchmark, arm and block the value is the 5th percentile over samples of the
+# benchmark's metric: cycles of the calling thread, or wall time for work that leaves it.
+# Not the minimum: a process occasionally records one sample far below all others. A benchmark
 # whose records disagree on the unit (counters missing on some arm or block) is judged on
 # time throughout. A change is reported only when it is robust: every block's ratio
 # exceeds the tolerance, the head and base values do not overlap at all, and the
 # difference clears an absolute floor.
 # Instruction counts are exact from process to process, so a change in them is reported
 # separately: the generated code or the work done changed, whether or not it is slower.
+# Kernels that dispatch at runtime are the exception: the call cache is keyed on the
+# caller's address, so its collisions move with code layout.
 include(joinpath(@__DIR__, "driver", "json.jl"))
 using .BenchJSON
 using Printf
@@ -27,6 +30,9 @@ using Printf
 const DEFAULT_TOL = Dict("cycles" => 0.03, "time" => 0.06)
 const FLOOR = Dict("cycles" => 5_000, "time" => 2_000)  # cycles, ns
 const INSTR_TOL = 0.005
+# Measured between consecutive master builds that differ only in code no benchmark runs:
+# up to 12% in cycles with identical instructions (sysimage Dict, sort, exp, sincos)
+const LAYOUT_TOL = 0.15
 const SUITE_TOL = 0.015
 
 struct Cell
@@ -50,10 +56,13 @@ end
 
 function cell(r, m)
     c = r["counters"]
-    v = m == "cycles" ? minimum(c["cycles"]) : r["min_ns"]
+    t = low(r["times_ns"])
+    v = m == "cycles" ? low(c["cycles"]) : t
     ins = haskey(c, "instructions") ? Float64(minimum(c["instructions"])) : nothing
-    return Cell(v, r["min_ns"], ins, r["allocs"], r["bytes"])
+    return Cell(v, t, ins, r["allocs"], r["bytes"])
 end
+
+low(v) = Float64(sort(v)[cld(length(v), 20)])
 
 # cells[name][arm][block] => Cell. A benchmark is judged in one unit: when its records
 # disagree (cycles on one arm or block, time on another), time for all of them.
@@ -136,15 +145,6 @@ function judge(cells, info, base, head)
         b = [arms[base][k].value for k in blocks]
         h = [arms[head][k].value for k in blocks]
         ratios = h ./ b
-        tol = inf.tolerance
-        floor_ok = abs(minimum(h) - minimum(b)) >= FLOOR[inf.metric]
-        verdict = if all(>(1 + tol), ratios) && minimum(h) > maximum(b) && floor_ok
-            "regression"
-        elseif all(<(1 / (1 + tol)), ratios) && maximum(h) < minimum(b) && floor_ok
-            "improvement"
-        else
-            "same"
-        end
         bi = [arms[base][k].instructions for k in blocks]
         hi = [arms[head][k].instructions for k in blocks]
         # Only the calling thread is counted, which says little about work spread over threads
@@ -156,6 +156,23 @@ function judge(cells, info, base, head)
         instr_stable = instr_ratio !== nothing && spread(bi) <= INSTR_TOL / 2 && spread(hi) <= INSTR_TOL / 2
         instr_changed = instr_stable && abs(instr_ratio - 1) > INSTR_TOL &&
                         all(k -> abs(hi[k] / bi[k] - 1) > INSTR_TOL, eachindex(blocks))
+        tol = inf.tolerance
+        # Code placement differs between any two builds, including the sysimage code a kernel
+        # runs, and every block shares it. Without an instruction change to explain it, a
+        # cycles change must exceed LAYOUT_TOL.
+        if inf.metric == "cycles" && instr_ratio !== nothing
+            moved = log(sort(ratios)[cld(length(ratios), 2)])
+            explained = instr_stable && log(instr_ratio) * moved > 0 && abs(log(instr_ratio)) >= abs(moved) / 2
+            explained || (tol = max(tol, LAYOUT_TOL))
+        end
+        floor_ok = abs(minimum(h) - minimum(b)) >= FLOOR[inf.metric]
+        verdict = if all(>(1 + tol), ratios) && minimum(h) > maximum(b) && floor_ok
+            "regression"
+        elseif all(<(1 / (1 + tol)), ratios) && maximum(h) < minimum(b) && floor_ok
+            "improvement"
+        else
+            "same"
+        end
         ab = minimum(arms[base][k].allocs for k in blocks)
         ah = minimum(arms[head][k].allocs for k in blocks)
         push!(rows, (; name, category = inf.category, metric = inf.metric, mixed_units = inf.mixed_units, tolerance = tol, verdict,
@@ -244,7 +261,8 @@ function compare_report(io, rows, suites, incomplete, skipped, meta, base, head,
     println(io, "\n</details>")
     incomplete_report(io, incomplete, skipped, meta)
     println(io, "\n<sub>A change counts when every block agrees beyond the tolerance (cycles 3%, time 6% unless the benchmark sets its own) ",
-            "and the arms do not overlap. Instruction counts are exact across processes; a change there means the code or work changed.</sub>")
+            "and the arms do not overlap. A cycles change that instruction counts do not explain must exceed $(round(Int, 100LAYOUT_TOL))%: ",
+            "code placement alone moves cycles that much between builds. Instruction counts are exact across processes; a change there means the code or work changed.</sub>")
 end
 
 function summary_report(io, cells, info, incomplete, skipped, meta, arm)
