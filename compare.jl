@@ -37,6 +37,7 @@ const INSTR_TOL = 0.005
 # up to 12% in cycles with identical instructions (sysimage Dict, sort, exp, sincos)
 const LAYOUT_TOL = 0.15
 const SUITE_TOL = 0.015
+const SUITE_MIN = 5
 # Allocation counts: a change counts above this fraction (and at least one allocation)
 const ALLOC_TOL = 0.001
 
@@ -90,8 +91,12 @@ function collect_cells(recs)
         m = length(units[name]) == 1 ? only(units[name]) : "time"
         get!(() -> Dict{String,Dict{Int,Cell}}(), cells, name)
         get!(Dict{Int,Cell}, cells[name], arm)[r["block"]] = cell(r, m)
-        info[name] = (; category = r["category"], metric = m, ops = r["ops"], mixed_units = length(units[name]) > 1,
-                      tolerance = something(r["tolerance"], DEFAULT_TOL[m]))
+        # A benchmark meant for counters but judged on time (no counters on this machine)
+        # keeps no tolerance tighter than time's
+        tol = something(r["tolerance"], DEFAULT_TOL[m])
+        m == "time" && r["metric"] != "time" && (tol = max(tol, DEFAULT_TOL["time"]))
+        info[name] = (; category = r["category"], metric = m, declared = r["metric"], ops = r["ops"],
+                      mixed_units = length(units[name]) > 1, tolerance = tol)
     end
     return cells, info, errors, skipped
 end
@@ -141,7 +146,7 @@ fmt_bytes(b) = b < 1024 ? "$b B" : b < 1024^2 ? @sprintf("%.1f KiB", b / 1024) :
 fmt_pct(r) = @sprintf("%+.1f%%", 100 * (r - 1))
 geomean(xs) = exp(sum(log, xs) / length(xs))
 
-function judge(cells, info, base, head)
+function judge(cells, info, base, head, nblocks)
     rows = Any[]
     for name in sort!(collect(keys(cells)))
         arms = cells[name]
@@ -173,7 +178,9 @@ function judge(cells, info, base, head)
             explained || (tol = max(tol, LAYOUT_TOL))
         end
         floor_ok = abs(minimum(h) - minimum(b)) >= FLOOR[inf.metric]
-        verdict = if all(>(1 + tol), ratios) && minimum(h) > maximum(b) && floor_ok
+        verdict = if length(blocks) < nblocks
+            "same"  # fewer blocks than the run promised: listed as incomplete, not judged
+        elseif all(>(1 + tol), ratios) && minimum(h) > maximum(b) && floor_ok
             "regression"
         elseif all(<(1 / (1 + tol)), ratios) && maximum(h) < minimum(b) && floor_ok
             "improvement"
@@ -183,12 +190,13 @@ function judge(cells, info, base, head)
         ab = minimum(arms[base][k].allocs for k in blocks)
         ah = minimum(arms[head][k].allocs for k in blocks)
         # Allocation counts repeat almost exactly between processes and builds (compiler
-        # workloads differ by a few in 800k); scheduling makes them vary in threaded ones
+        # workloads differ by a few in 800k); scheduling makes them vary in the benchmarks
+        # declared on time (threads, GC)
         abx = maximum(arms[base][k].allocs for k in blocks)
         ahx = maximum(arms[head][k].allocs for k in blocks)
-        alloc_change = inf.metric == "time" || abs(ah - ab) <= max(0, ALLOC_TOL * ab) ? "" :
+        alloc_change = inf.declared == "time" || abs(ah - ab) <= max(0, ALLOC_TOL * ab) ? "" :
                        ah > abx ? "more" : ahx < ab ? "fewer" : ""
-        push!(rows, (; name, category = inf.category, metric = inf.metric, mixed_units = inf.mixed_units, tolerance = tol, verdict,
+        push!(rows, (; name, block_ids = blocks, category = inf.category, metric = inf.metric, mixed_units = inf.mixed_units, tolerance = tol, verdict,
                      base = minimum(b), head = minimum(h), ratio = minimum(h) / minimum(b), ratios,
                      base_time = minimum(arms[base][k].time for k in blocks),
                      head_time = minimum(arms[head][k].time for k in blocks),
@@ -199,14 +207,27 @@ function judge(cells, info, base, head)
     return rows
 end
 
+# A category's geometric mean, per block, over the blocks every benchmark in it has. It
+# counts only with at least SUITE_MIN benchmarks and when it holds without the benchmark
+# that moved most: one benchmark's code placement can move 12%, which must not decide a
+# category the per-benchmark rule did not flag.
 function suite_verdicts(rows)
     out = Any[]
     for cat in sort!(unique(r.category for r in rows))
         rs = filter(r -> r.category == cat, rows)
-        nb = minimum(r -> length(r.ratios), rs)
-        per_block = [geomean([r.ratios[k] for r in rs]) for k in 1:nb]
-        verdict = all(>(1 + SUITE_TOL), per_block) ? "regression" :
-                  all(<(1 / (1 + SUITE_TOL)), per_block) ? "improvement" : "same"
+        common = reduce(intersect, (r.block_ids for r in rs))
+        ratio_at(r, k) = r.ratios[findfirst(==(k), r.block_ids)]
+        per_block = [geomean([ratio_at(r, k) for r in rs]) for k in common]
+        # Per block, the geometric mean without the benchmark furthest from 1
+        robust = [begin
+                      xs = [log(ratio_at(r, k)) for r in rs]
+                      deleteat!(xs, argmax(abs.(xs)))
+                      isempty(xs) ? 1.0 : exp(sum(xs) / length(xs))
+                  end for k in common]
+        judged = length(rs) >= SUITE_MIN && !isempty(common)
+        verdict = !judged ? "same" :
+                  all(>(1 + SUITE_TOL), per_block) && all(>(1 + SUITE_TOL), robust) ? "regression" :
+                  all(<(1 / (1 + SUITE_TOL)), per_block) && all(<(1 / (1 + SUITE_TOL)), robust) ? "improvement" : "same"
         push!(out, (; category = cat, geomean = geomean([r.ratio for r in rs]), per_block, verdict, n = length(rs)))
     end
     return out
@@ -372,11 +393,12 @@ function main(args)
         return broken ? 2 : 0
     end
     incomplete = incompleteness(cells, errors, meta, [base, head])
-    rows = judge(cells, info, base, head)
+    broken |= !isempty(incomplete)
+    rows = judge(cells, info, base, head, meta["settings"]["blocks"])
     suites = suite_verdicts(rows)
     if control !== nothing
         control in arms || error("no arm named $control")
-        rows_c = judge(cells, info, control, head)
+        rows_c = judge(cells, info, control, head, meta["settings"]["blocks"])
         rows = apply_control(rows, rows_c, :name)
         suites = apply_control(suites, suite_verdicts(rows_c), :category)
     end

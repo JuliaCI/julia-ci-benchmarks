@@ -172,8 +172,8 @@ bench(union_store_copy, union_store_copy_setup; ops = 2^18)
 # Int32 over bytes): the index arithmetic of ReinterpretArray setindex!, historically
 # 10-250x slower than a plain array (#42227, #48801, #51658)
 function reinterpret_write_setup()
-    b, orig = carve(UInt8, 2^18, 2)
-    orig .= UInt8.(rand_int(SplitMix(20), 2^18, 0, 255))
+    b, orig = carve(UInt8, 2^20, 2)
+    orig .= UInt8.(rand_int(SplitMix(20), 2^20, 0, 255))
     return copyto!(b, orig), orig
 end
 zigzag(n) = (n >> one(n)) ⊻ -(n & one(n))
@@ -186,7 +186,7 @@ function reinterpret_write(b, _)
     w .+= Int32(1)
     return Int(b[1])
 end
-bench(reinterpret_write, reinterpret_write_setup; ops = 2^18, reset = (b, orig) -> copyto!(b, orig))
+bench(reinterpret_write, reinterpret_write_setup; ops = 2^20, reset = (b, orig) -> copyto!(b, orig))
 
 # A vector of 3-tuples seen as a 3×n matrix through reinterpret(reshape, ...): column
 # access and a reduction over the reshaped reinterpret
@@ -276,7 +276,7 @@ end
 bench(logical_index, logical_index_setup; ops = 4 * 2^16, tolerance = 0.08)
 
 # Missing values as data-frame code has them: map over two Union{Missing,Float32}
-# arrays, skipmissing reductions (#54811, #55374)
+# arrays, skipmissing reductions and filter (#54811, #55374)
 function missing_ops_setup()
     r = SplitMix(27)
     f(x) = x < 0.1 ? missing : Float32(x)
@@ -284,12 +284,13 @@ function missing_ops_setup()
 end
 function missing_ops(a, b)
     c = map(*, a, b)
-    return sum(skipmissing(a)) + length(collect(skipmissing(c))) + count(ismissing, c)
+    return sum(skipmissing(a)) + length(collect(skipmissing(c))) + count(ismissing, c) +
+           length(filter(x -> x > 0.5f0, skipmissing(b)))
 end
 bench(missing_ops, missing_ops_setup; ops = 4 * 2^16)
 
 # A deque on a Vector: pushfirst!, insert! near the front, pop! and popfirst!, which grow
-# and shrink at both ends (#56026, #58640)
+# and shrink at both ends (#56026)
 front_churn_setup() = rand_int(SplitMix(28), 2^15, 0, 10^6)
 function front_churn(xs)
     v = Int[]
@@ -308,9 +309,9 @@ bench(front_churn, front_churn_setup; ops = 2^15, tolerance = 0.06)
 # Stores through a raw pointer while reading a 3-d array: unless aliasing information
 # says otherwise, the array's size and data pointer are reloaded every iteration (#63782)
 function ptr_store_setup()
-    dst, src = carve(Float64, 5 * 6 * 2000, 2)
+    dst, src = carve(Float64, 5 * 6 * 6000, 2)
     src .= rand_f64(SplitMix(29), length(src))
-    return dst, reshape(src, 5, 6, 2000)
+    return dst, reshape(src, 5, 6, 6000)
 end
 function ptr_store(dst, src)
     GC.@preserve dst begin
@@ -322,6 +323,6 @@ function ptr_store(dst, src)
     end
     return dst[1]
 end
-bench(ptr_store, ptr_store_setup; ops = 5 * 6 * 2000)
+bench(ptr_store, ptr_store_setup; ops = 5 * 6 * 6000)
 
 end

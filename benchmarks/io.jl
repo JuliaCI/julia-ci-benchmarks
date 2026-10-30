@@ -84,7 +84,10 @@ bench(file_roundtrip, file_roundtrip_setup; ops = 64, tolerance = 0.15)
 function small_reads_setup()
     path = tempname()
     write(path, UInt8.(rand_int(SplitMix(42), 2^20, 0, 255)))
-    return open(path), zeros(4), zeros(UInt8, 32)
+    io = open(path)
+    # The open stream keeps the data; Windows cannot remove an open file
+    Sys.iswindows() || rm(path)
+    return io, zeros(4), zeros(UInt8, 32)
 end
 function small_reads(io, a, b)
     seekstart(io)

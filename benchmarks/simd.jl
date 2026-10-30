@@ -69,9 +69,11 @@ bench(broadcast_fused, broadcast_fused_setup; ops = 2^18)
 # Broadcasting a matrix against a row and a column needs index extrusion
 function broadcast_2d_extrude_setup()
     r = SplitMix(9)
-    return reshape(rand_f64(r, 512 * 512), 512, 512), rand_f64(r, 512), rand_f64(r, 512)
+    out, A = carve(Float64, 512 * 512, 2)
+    A .= rand_f64(r, 512 * 512)
+    return reshape(out, 512, 512), reshape(A, 512, 512), rand_f64(r, 512), rand_f64(r, 512)
 end
-broadcast_2d_extrude(A, col, row) = A .= A .* col .+ row' .- 1.0
+broadcast_2d_extrude(out, A, col, row) = out .= A .* col .+ row' .- 1.0
 bench(broadcast_2d_extrude, broadcast_2d_extrude_setup; ops = 512 * 512)
 
 # A data-dependent select that must become a vector blend rather than a branch
@@ -151,10 +153,10 @@ bench(complex_mul_sum, complex_mul_sum_setup; ops = 2^16)
 # A float reduction and a Bool all-reduction in one @simd loop (#64384: stopped
 # vectorizing with LLVM 23)
 function sum_flag_setup()
-    w, x = carve(Float32, 2^17, 2)
+    w, x = carve(Float32, 2^19, 2)
     r = SplitMix(30)
-    w .= rand_f32(r, 2^17)
-    x .= rand_f32(r, 2^17, -1, 1)
+    w .= rand_f32(r, 2^19)
+    x .= rand_f32(r, 2^19, -1, 1)
     return w, x
 end
 function sum_flag(w, x)
@@ -167,7 +169,7 @@ function sum_flag(w, x)
     end
     return s, ok
 end
-bench(sum_flag, sum_flag_setup; ops = 2^17)
+bench(sum_flag, sum_flag_setup; ops = 2^19)
 
 # Stride-2 dot products with two accumulators, which SLP or the loop vectorizer may take
 # depending on the cost model (#63165)

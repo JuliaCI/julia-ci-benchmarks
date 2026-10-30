@@ -3,7 +3,8 @@
 module CollectionsBench
 using ..Driver
 
-# Built from empty every sample, so rehash growth is included; half the lookups miss
+# Built from empty every sample, so rehash growth is included; about a fifth of the
+# lookups hit
 function dict_int_setup()
     r = SplitMix(1)
     return rand_int(r, 2^16, 1, 2^18), rand_int(r, 2^16, 1, 2^18)

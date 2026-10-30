@@ -57,7 +57,8 @@ function pow_f64(xs, ys)
 end
 bench(pow_f64, pow_f64_setup; ops = 2^16)
 
-# The vectorizable form: libm inlined into a map! that the loop vectorizer can widen
+# Float32 exp through map!: one call of Base's exp per element. It is not inlined, so the
+# loop stays scalar (1.10 to 1.15); a vectorized form would need an inlined exp
 function exp_f32_map_setup()
     x, y = carve(Float32, 2^18, 2)
     x .= rand_f32(SplitMix(5), 2^18, -20.0, 20.0)
@@ -112,7 +113,9 @@ function float16_muladd(a, b, c)
     end
     c
 end
-bench(float16_muladd, float16_muladd_setup; ops = 2^20)
+# c restarts from zero every sample: the recurrence settles after ~30 calls, and the
+# share of subnormals changes until then
+bench(float16_muladd, float16_muladd_setup; ops = 2^20, reset = (a, b, c) -> fill!(c, zero(Float16)))
 
 # Overflow-checked integer arithmetic and checked float-to-int conversion
 function checked_convert_setup()

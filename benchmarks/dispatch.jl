@@ -25,7 +25,7 @@ area(s::Tri) = 0.5 * s.b * s.h
 function abstract_eltype_call(shapes)
     s = 0.0
     for sh in shapes
-        s += area(sh)
+        s += area(sh)::Float64
     end
     return s
 end
@@ -146,8 +146,9 @@ function union_accumulator(x)
 end
 bench(union_accumulator, union_accumulator_setup; ops = 2^16)
 
-# A union of six singleton types, past the union-splitting limit, through sum(f, v) and
-# a generator (#58370)
+# A Vector of a union of six singleton types through sum(f, v) and a generator (#58370).
+# Past the union-splitting limit in principle; in practice the weights become a table
+# lookup and the reduction vectorizes, which is what this guards
 struct S1 end
 struct S2 end
 struct S3 end
@@ -167,7 +168,8 @@ end
 big_union(v) = sum(weight, v) + sum(weight(x) for x in v)
 bench(big_union, big_union_setup; ops = 2 * 2^18)
 
-# Iterating a tuple of different functions, and recursing over one (#56607, #58168)
+# Iterating a tuple of different functions (dynamic, allocating), and recursing over one
+# (inlined; the shape of #58168)
 const BINOPS = (+, -, *, /, hypot, atan)
 @inline fmap_rec(x, f, fs...) = (f(x...), fmap_rec(x, fs...)...)
 @inline fmap_rec(x) = ()
@@ -196,15 +198,15 @@ end
 function dynamic_ctor_setup()
     r = SplitMix(37)
     vals = Any[1, 2.0, "s", true, 'c', 0x01, Int32(3), 1.5f0]
-    return Any[vals[k] for k in rand_int(r, 2^13, 1, 8)]
+    xs = Any[vals[k] for k in rand_int(r, 2^14, 1, 8)]
+    return xs, similar(xs)
 end
-function dynamic_ctor(xs)
-    n = 0
-    for x in xs
-        n += Box(x) isa Box{<:Number}
+function dynamic_ctor(xs, out)
+    for i in eachindex(xs, out)
+        out[i] = Box(xs[i])
     end
-    return n
+    return out
 end
-bench(dynamic_ctor, dynamic_ctor_setup; ops = 2^13, tolerance = 0.06)
+bench(dynamic_ctor, dynamic_ctor_setup; ops = 2^14, tolerance = 0.06)
 
 end
