@@ -16,7 +16,7 @@ is_bench(ex) = occursin("bench(", string(ex))
 function blocks(path)
     body = Meta.parseall(read(path, String)).args
     mod = only(filter(e -> Meta.isexpr(e, :module), body))
-    stmts = filter(e -> !(e isa LineNumberNode), mod.args[3].args)
+    stmts = filter(e -> !(e isa LineNumberNode), mod.args[end].args)  # newer versions prepend a version
     stmts = filter(e -> !(Meta.isexpr(e, :using)), stmts)
     src = read(path, String)
     shared = Any[]
