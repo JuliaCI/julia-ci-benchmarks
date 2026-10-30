@@ -30,7 +30,7 @@ include(joinpath(@__DIR__, "driver", "json.jl"))
 using .BenchJSON
 using Printf
 
-const DEFAULT_TOL = Dict("cycles" => 0.03, "time" => 0.06, "instructions" => 0.01)
+const DEFAULT_TOL = Dict("cycles" => 0.03, "time" => 0.06, "instructions" => 0.02)
 const FLOOR = Dict("cycles" => 5_000, "time" => 2_000, "instructions" => 10_000)  # cycles, ns, instructions
 const INSTR_TOL = 0.005
 # Measured between consecutive master builds that differ only in code no benchmark runs:

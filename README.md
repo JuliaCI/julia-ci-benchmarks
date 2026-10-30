@@ -49,7 +49,12 @@ kernel. So single-threaded benchmarks are judged on **cycles**. A change in
 whether or not it costs time. Benchmarks whose work leaves the calling thread (the
 scheduler, parallel GC marking, collections) are judged on wall time with a wider
 tolerance. With root, the driver also records branch misses and L1D misses through kperf
-(`CIBENCH_COUNTERS=kperf`); without root it falls back to cycles and instructions.
+(`CIBENCH_COUNTERS=kperf`); without root it falls back to cycles and instructions. On Linux
+the driver reads the same two counters for the calling thread, user space only, through
+`perf_event_open` (`kernel.perf_event_paranoid` <= 2, the usual default); on an AMD EPYC
+the scalar benchmarks' instruction counts were identical across processes too. Where no
+counters can be read (Windows, a container that blocks the syscall, a VM without a PMU),
+every benchmark is judged on wall time.
 
 **Processes, not samples.** Every driver tested showed a 6–11% spread in the minimum
 across fresh processes, however long each process sampled. Heap layout, ASLR and code
@@ -95,8 +100,8 @@ well and use 6%. A comparison of two builds takes about 8 minutes on the M4 Pro.
 BaseBenchmarks: an `AbstractInterpreter` with its own cache infers whole call graphs,
 Base's included) allocates millions of objects per sample, and its cycles vary 2-11%
 between processes even after a full collection before each sample. Its instruction counts
-stay within 0.5%, and compiler work moved at most 0.2% in instructions across the
-layout-only build pairs, so these benchmarks use `metric = "instructions"` with a 1%
+stay within 0.5% (0.9% on an AMD EPYC under Linux), and compiler work moved at most 0.2% in instructions across the
+layout-only build pairs, so these benchmarks use `metric = "instructions"` with a 2%
 tolerance.
 
 **Allocations are reported, not judged.** Every sample records the allocation count and

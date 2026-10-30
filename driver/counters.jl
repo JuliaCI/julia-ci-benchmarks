@@ -3,15 +3,20 @@
 #   :kperf   macOS, root only: cycles, instructions, branches, branch misses, L1D load misses
 #            through the private kperf/kperfdata frameworks
 #   :thread  macOS, no privileges: cycles and instructions from `thread_selfcounts`
+#   :perf    Linux: user-space cycles and instructions of the calling thread through
+#            perf_event_open, which needs kernel.perf_event_paranoid <= 2 (the default
+#            on most distributions) and a container that allows the syscall
 #   :none    anything else
 #
-# `CIBENCH_COUNTERS` (auto, kperf, thread, none) overrides the automatic choice.
+# `CIBENCH_COUNTERS` (auto, kperf, thread, perf, none) overrides the automatic choice.
 struct CounterBackend
     kind::Symbol
     names::Vector{String}
-    map::Vector{Int}          # event k is at buf[map[k]] in the kperf counter buffer
+    map::Vector{Int}          # event k is at buf[map[k]] in the backend's buffer
     buf::Vector{UInt64}
+    fd::Cint                  # perf: the group leader's file descriptor
 end
+CounterBackend(kind, names, map, buf) = CounterBackend(kind, names, map, buf, Cint(-1))
 
 const NO_COUNTERS = CounterBackend(:none, String[], Int[], UInt64[])
 
@@ -30,6 +35,12 @@ const KPERF_EVENTS = [
 function counter_backend()
     want = get(ENV, "CIBENCH_COUNTERS", "auto")
     want == "none" && return NO_COUNTERS
+    if Sys.islinux()
+        want in ("auto", "perf") || error("unknown CIBENCH_COUNTERS=$want on Linux")
+        b = perf_backend()
+        b === nothing && want == "perf" && @warn "perf_event_open counters unavailable"
+        return something(b, NO_COUNTERS)
+    end
     Sys.isapple() || return NO_COUNTERS
     if want in ("auto", "kperf")
         b = try
@@ -51,6 +62,9 @@ end
 function read_counters!(b::CounterBackend, out::Vector{UInt64})
     if b.kind === :thread
         ccall(:thread_selfcounts, Cint, (Cint, Ptr{UInt64}, Csize_t), 1, b.buf, sizeof(b.buf))
+    elseif b.kind === :perf
+        # One read of the group leader gives {number of events, cycles, instructions}
+        ccall(:read, Cssize_t, (Cint, Ptr{UInt64}, Csize_t), b.fd, b.buf, sizeof(b.buf))
     elseif b.kind === :kperf
         ccall(KPERF_SYM[][:kpc_get_thread_counters], Cint, (UInt32, UInt32, Ptr{UInt64}),
               0, KPC_MAX_COUNTERS, b.buf)
@@ -123,4 +137,42 @@ function kperf_backend()
     KPERF_SYM[] = sym
     return CounterBackend(:kperf, names, [Int(cmap[k]) + 1 for k in eachindex(names)],
                           zeros(UInt64, KPC_MAX_COUNTERS))
+end
+
+# Linux perf_event_open: a group of two hardware events, user space only, counting the
+# calling thread (pid 0, any CPU) from the moment they are opened
+const PERF_EVENT_OPEN = Dict(:x86_64 => 298, :aarch64 => 241, :i686 => 336, :powerpc64le => 319, :riscv64 => 241)
+function perf_open(config::UInt64, group::Cint)
+    attr = zeros(UInt8, 128)
+    put!(T, off, v) = unsafe_store!(Ptr{T}(pointer(attr, off + 1)), v)
+    fd = GC.@preserve attr begin
+        put!(UInt32, 0, UInt32(0))                  # type: PERF_TYPE_HARDWARE
+        put!(UInt32, 4, UInt32(128))                # size of the struct
+        put!(UInt64, 8, config)                     # 0 cycles, 1 instructions
+        put!(UInt64, 32, UInt64(0x8))               # read_format: PERF_FORMAT_GROUP
+        put!(UInt64, 40, UInt64((1 << 5) | (1 << 6))) # exclude_kernel, exclude_hv
+        ccall(:syscall, Clong, (Clong, Ptr{UInt8}, Cint, Cint, Cint, Culong),
+              PERF_EVENT_OPEN[Sys.ARCH], attr, 0, -1, group, 0)
+    end
+    return Cint(fd)
+end
+function perf_backend()
+    haskey(PERF_EVENT_OPEN, Sys.ARCH) || return nothing
+    leader = perf_open(UInt64(0), Cint(-1))
+    leader < 0 && return nothing
+    if perf_open(UInt64(1), leader) < 0
+        ccall(:close, Cint, (Cint,), leader)
+        return nothing
+    end
+    b = CounterBackend(:perf, ["cycles", "instructions"], [2, 3], zeros(UInt64, 3), leader)
+    # A virtual machine without a PMU opens the events but never counts
+    read_counters!(b, zeros(UInt64, 2))
+    x = b.buf[3]
+    s = 0
+    for i in 1:1000
+        s += i
+    end
+    Base.donotdelete(s)
+    read_counters!(b, zeros(UInt64, 2))
+    return b.buf[1] == 2 && b.buf[3] > x ? b : nothing
 end
