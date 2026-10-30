@@ -3,7 +3,7 @@
 A runtime benchmark suite for Julia itself, small enough to run on every commit to
 `master` and on pull requests, on the same macOS aarch64 machine as the TTFX job. It
 complements [BaseBenchmarks.jl](https://github.com/JuliaCI/BaseBenchmarks.jl): instead of
-thousands of overlapping cases, it has 113 benchmarks, each chosen to cover a code path
+thousands of overlapping cases, it has 145 benchmarks, each chosen to cover a code path
 the others do not. The suite targets what changes when *Julia* changes: codegen and
 aliasing information, LLVM upgrades, inference, lowering, the runtime, the GC and the
 scheduler. Library performance (LinearAlgebra, SparseArrays, ...) is out of scope.
@@ -70,8 +70,21 @@ benchmark seeds its own, so adding a benchmark never changes another's inputs.
 **Calibrated by an A/A run.** Both arms the same build, the whole suite, three blocks:
 no benchmark and no category was flagged. Single-threaded benchmarks have a median
 worst-block deviation of 1.25% in cycles (90th percentile 5%). The tail is
-allocation-heavy kernels, which carry wider tolerances. A comparison of two builds takes
-about 5.5 minutes on the M4 Pro, and measuring one build alone about 3 minutes.
+allocation-heavy kernels, which carry wider tolerances.
+
+**And by pairs of builds that should not differ.** An A/A run cannot see code placement:
+two builds lay out the sysimage and the runtime differently even when the commit between
+them touches only tests, lowering or JuliaSyntax (the build path is compiled in, so not
+even the same commit built by two pipelines is bit-identical). Every block runs the same
+two binaries, so blocks do not average this out. Over five consecutive julia-ci master
+pairs of that kind, kernels whose hot code is in the sysimage (`Dict{Int,Int}`, integer
+`sort!`, `exp`, `sincos`, `log`) moved 4-12% in cycles with identical instruction counts,
+and each pair flagged two to four of them. So a cycles change that the instruction counts
+do not explain (the same direction, at least half the size) must exceed 15%, which
+cleared all five pairs; a change with an instruction change behind it keeps the
+benchmark's own tolerance. Runtime dispatch goes through a call cache keyed on the
+caller's address, so the dynamic-dispatch kernels move a few percent in instructions as
+well and use 6%. A comparison of two builds takes about 6.5 minutes on the M4 Pro.
 
 **A bespoke driver.** BenchmarkTools and Chairmarks were measured against the driver
 here on the same kernels. With equal time budgets their estimates are no more stable

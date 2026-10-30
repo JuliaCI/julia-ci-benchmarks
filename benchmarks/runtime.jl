@@ -159,4 +159,20 @@ if isdefined(Base, :ScopedValues)
     bench(scoped_values; ops = 2^12)
 end
 
+
+# Calls inside a loop over the const fields of a mutable struct: the loads are invariant,
+# and losing that keeps every field live in the GC frame across each call (#63480)
+mutable struct WithConst{S<:Tuple}
+    const cols::S
+end
+@noinline bump!(c::Vector{Float64}) = (@inbounds c[1] += 1.0; nothing)
+const_field_roots_setup() = (WithConst(ntuple(_ -> zeros(1), 64)), rand_int(SplitMix(43), 2^14, 1, 64))
+function const_field_roots(s, ks)
+    for k in ks
+        Base.Cartesian.@nexprs 64 i -> i == k && bump!(s.cols[i])
+    end
+    return s.cols[1][1]
+end
+bench(const_field_roots, const_field_roots_setup; ops = 2^14)
+
 end

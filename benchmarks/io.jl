@@ -8,7 +8,11 @@ iobuffer_print_setup() = (rand_int(SplitMix(1), 8192, -10^9, 10^9), rand_f64(Spl
 function iobuffer_print(is, fs)
     io = IOBuffer()
     for i in eachindex(is)
-        print(io, is[i], '\t', fs[i], '\t', :sym, '\t', "text", '\n')
+        # One call per value: print(io, xs...) with mixed types dispatches at runtime
+        print(io, is[i])
+        print(io, '\t')
+        print(io, fs[i])
+        print(io, "\t:sym\ttext\n")
     end
     return position(io)
 end
@@ -73,5 +77,25 @@ function file_roundtrip(path, chunk)
     return n
 end
 bench(file_roundtrip, file_roundtrip_setup; ops = 64, tolerance = 0.15)
+
+
+# Many small reads from a file: per-call overhead of read! and readbytes! on an IOStream
+# (#62856, #63788)
+function small_reads_setup()
+    path = tempname()
+    write(path, UInt8.(rand_int(SplitMix(42), 2^20, 0, 255)))
+    return open(path), zeros(4), zeros(UInt8, 32)
+end
+function small_reads(io, a, b)
+    seekstart(io)
+    s = 0
+    for _ in 1:2^13
+        read!(io, a)
+        readbytes!(io, b, 32)
+        s += b[1]
+    end
+    return s
+end
+bench(small_reads, small_reads_setup; ops = 2 * 2^13)
 
 end

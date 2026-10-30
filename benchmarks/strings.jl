@@ -132,4 +132,18 @@ function symbol_intern(strs)
 end
 bench(symbol_intern, symbol_intern_setup; ops = 8192)
 
+
+# Small strings from integers: string(k), other bases, padding, mixed concatenation
+# (#53950)
+small_strings_setup() = rand_int(SplitMix(41), 2^14, -10^6, 10^6)
+function small_strings(ks)
+    n = 0
+    for k in ks
+        n += sizeof(string(k)) + sizeof(string(k; base = 16)) + sizeof(lpad(k, 9, '0')) +
+             sizeof(string("x", k, '_', k % 7))
+    end
+    return n
+end
+bench(small_strings, small_strings_setup; ops = 4 * 2^14)
+
 end

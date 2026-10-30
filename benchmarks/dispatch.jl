@@ -1,5 +1,7 @@
 # Code that is not fully inferred: runtime dispatch, union splitting, boxed closures,
 # keyword calls and splatting. Receivers are shuffled so call targets are unpredictable.
+# Dynamic calls go through a call cache keyed on the caller's address, so their
+# instruction counts move a few percent with code placement: those benchmarks use 6%.
 module DispatchBench
 using ..Driver
 
@@ -76,7 +78,7 @@ function any_arith(xs)
     end
     return s
 end
-bench(any_arith, any_arith_setup; ops = 2^15)
+bench(any_arith, any_arith_setup; ops = 2^15, tolerance = 0.06)
 
 # A captured variable that is reassigned becomes a Core.Box; lowering decides this
 boxed_closure_setup() = rand_f64(SplitMix(4), 2^16)
@@ -104,7 +106,7 @@ function kwcall_dynamic(xs, kws, which)
     end
     return s
 end
-bench(kwcall_dynamic, kwcall_dynamic_setup; ops = 2^14)
+bench(kwcall_dynamic, kwcall_dynamic_setup; ops = 2^14, tolerance = 0.06)
 
 # Splatting runtime-length collections goes through Core._apply_iterate
 function splat_dynamic_setup()
@@ -118,7 +120,7 @@ function splat_dynamic(vs)
     end
     return s
 end
-bench(splat_dynamic, splat_dynamic_setup; ops = 2^13)
+bench(splat_dynamic, splat_dynamic_setup; ops = 2^13, tolerance = 0.06)
 
 # invokelatest: the world-age escape hatch used by REPL, callbacks and plugins
 invokelatest_calls_setup() = rand_f64(SplitMix(7), 2^14)
@@ -129,6 +131,80 @@ function invokelatest_calls(xs)
     end
     return s
 end
-bench(invokelatest_calls, invokelatest_calls_setup; ops = 2^14)
+bench(invokelatest_calls, invokelatest_calls_setup; ops = 2^14, tolerance = 0.06)
+
+
+# An accumulator that starts as an Int and becomes a Float64: a Union{Int,Float64}
+# carried around the loop (#52875)
+union_accumulator_setup() = rand_f64(SplitMix(34), 2^16)
+function union_accumulator(x)
+    s = 0
+    for t in x
+        s += t
+    end
+    return s
+end
+bench(union_accumulator, union_accumulator_setup; ops = 2^16)
+
+# A union of six singleton types, past the union-splitting limit, through sum(f, v) and
+# a generator (#58370)
+struct S1 end
+struct S2 end
+struct S3 end
+struct S4 end
+struct S5 end
+struct S6 end
+weight(::S1) = 1
+weight(::S2) = 2
+weight(::S3) = 3
+weight(::S4) = 4
+weight(::S5) = 5
+weight(::S6) = 6
+function big_union_setup()
+    inst = (S1(), S2(), S3(), S4(), S5(), S6())
+    return Union{S1,S2,S3,S4,S5,S6}[inst[k] for k in rand_int(SplitMix(35), 2^18, 1, 6)]
+end
+big_union(v) = sum(weight, v) + sum(weight(x) for x in v)
+bench(big_union, big_union_setup; ops = 2 * 2^18)
+
+# Iterating a tuple of different functions, and recursing over one (#56607, #58168)
+const BINOPS = (+, -, *, /, hypot, atan)
+@inline fmap_rec(x, f, fs...) = (f(x...), fmap_rec(x, fs...)...)
+@inline fmap_rec(x) = ()
+function function_tuple_setup()
+    r = SplitMix(36)
+    return rand_f64(r, 2^12, 0.5, 2), rand_f64(r, 2^12, 0.5, 2)
+end
+function function_tuple(xs, ys)
+    s = 0.0
+    for i in eachindex(xs)
+        x, y = xs[i], ys[i]
+        for op in BINOPS
+            s += op(x, y)
+        end
+        s += sum(fmap_rec((x, y), hypot, atan, min, max, copysign))
+    end
+    return s
+end
+bench(function_tuple, function_tuple_setup; ops = 2^12, tolerance = 0.06)
+
+# A parametric constructor called on values of unknown type: dispatch on Type{Box},
+# apply_type and allocation at runtime (#60701)
+struct Box{T}
+    a::T
+end
+function dynamic_ctor_setup()
+    r = SplitMix(37)
+    vals = Any[1, 2.0, "s", true, 'c', 0x01, Int32(3), 1.5f0]
+    return Any[vals[k] for k in rand_int(r, 2^13, 1, 8)]
+end
+function dynamic_ctor(xs)
+    n = 0
+    for x in xs
+        n += Box(x) isa Box{<:Number}
+    end
+    return n
+end
+bench(dynamic_ctor, dynamic_ctor_setup; ops = 2^13, tolerance = 0.06)
 
 end

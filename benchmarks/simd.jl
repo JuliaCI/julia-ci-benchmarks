@@ -147,4 +147,50 @@ function complex_mul_sum(z, w)
 end
 bench(complex_mul_sum, complex_mul_sum_setup; ops = 2^16)
 
+
+# A float reduction and a Bool all-reduction in one @simd loop (#64384: stopped
+# vectorizing with LLVM 23)
+function sum_flag_setup()
+    w, x = carve(Float32, 2^17, 2)
+    r = SplitMix(30)
+    w .= rand_f32(r, 2^17)
+    x .= rand_f32(r, 2^17, -1, 1)
+    return w, x
+end
+function sum_flag(w, x)
+    s = 0.0f0
+    ok = true
+    @inbounds @simd for i in eachindex(x)
+        a = w[i]
+        s += a * abs(x[i])
+        ok &= floatmin(Float32) <= a <= floatmax(Float32)
+    end
+    return s, ok
+end
+bench(sum_flag, sum_flag_setup; ops = 2^17)
+
+# Stride-2 dot products with two accumulators, which SLP or the loop vectorizer may take
+# depending on the cost model (#63165)
+strided_pairs_setup() = (zeros(128), rand_f64(SplitMix(31), 4096))
+pair_coef(i, j) = (i + j - 2) * (i + j - 1) / 2 + i
+function strided_pairs(out, v)
+    n = length(v)
+    @inbounds for i in 1:128
+        x1 = x2 = 0.0
+        fi = Float64(i)
+        for j in 1:2:n
+            x1 += v[j] / pair_coef(fi, Float64(j))
+            x2 += v[j+1] / pair_coef(fi, Float64(j + 1))
+        end
+        out[i] = x1 + x2
+    end
+    return out[1]
+end
+bench(strided_pairs, strided_pairs_setup; ops = 128 * 4096)
+
+# findmin/findmax and argmin/argmax, which take different paths to the same reduction
+find_extrema_setup() = rand_f64(SplitMix(32), 2^16)
+find_extrema(x) = findmin(x)[1] + findmax(x)[1] + x[argmin(x)] + x[argmax(x)]
+bench(find_extrema, find_extrema_setup; ops = 4 * 2^16)
+
 end

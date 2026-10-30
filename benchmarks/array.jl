@@ -167,4 +167,161 @@ function union_store_copy(b)
 end
 bench(union_store_copy, union_store_copy_setup; ops = 2^18)
 
+
+# Writes through reinterprets whose element size differs from the parent's (Int16 and
+# Int32 over bytes): the index arithmetic of ReinterpretArray setindex!, historically
+# 10-250x slower than a plain array (#42227, #48801, #51658)
+function reinterpret_write_setup()
+    b, orig = carve(UInt8, 2^18, 2)
+    orig .= UInt8.(rand_int(SplitMix(20), 2^18, 0, 255))
+    return copyto!(b, orig), orig
+end
+zigzag(n) = (n >> one(n)) ⊻ -(n & one(n))
+function reinterpret_write(b, _)
+    r = reinterpret(Int16, b)
+    @inbounds @simd for i in eachindex(r)
+        r[i] = zigzag(r[i])
+    end
+    w = reinterpret(Int32, b)
+    w .+= Int32(1)
+    return Int(b[1])
+end
+bench(reinterpret_write, reinterpret_write_setup; ops = 2^18, reset = (b, orig) -> copyto!(b, orig))
+
+# A vector of 3-tuples seen as a 3×n matrix through reinterpret(reshape, ...): column
+# access and a reduction over the reshaped reinterpret
+function reinterpret_reshape_setup()
+    v = rand_f64(SplitMix(21), 3 * 2^15)
+    return [(v[3i-2], v[3i-1], v[3i]) for i in 1:2^15]
+end
+function reinterpret_reshape(pts)
+    M = reinterpret(reshape, Float64, pts)
+    s = 0.0
+    @inbounds for j in axes(M, 2)
+        s += M[1, j] * M[2, j] - M[3, j]
+    end
+    c = sum(M; dims = 2)
+    return s + c[1] + c[2] + c[3]
+end
+bench(reinterpret_reshape, reinterpret_reshape_setup; ops = 2^15)
+
+# 12-byte records packed in a byte buffer and read through reinterpret: each element is
+# assembled from several parent elements
+struct Rec12
+    a::Float32
+    b::Float32
+    c::Int32
+end
+reinterpret_records_setup() = UInt8.(rand_int(SplitMix(22), 12 * 2^17, 0, 255))
+function reinterpret_records(bytes)
+    s = 0
+    for r in reinterpret(Rec12, bytes)
+        s += r.c + (r.a < r.b)
+    end
+    return s
+end
+bench(reinterpret_records, reinterpret_records_setup; ops = 2^17)
+
+# Assignment into 2-D views with UnitRange indices, by broadcast and by copyto!: SubArray
+# copyto_unaliased! and in-place broadcast lost vectorization twice in 1.11 (#53158, #53615)
+subarray_assign_setup() = (zeros(257, 257), reshape(rand_f64(SplitMix(23), 256^2), 256, 256))
+function subarray_assign(B, A)
+    B[1:end-1, 1:end-1] .= A
+    copyto!(view(B, 2:size(B, 1), 2:size(B, 2)), A)
+    return B[2, 2]
+end
+bench(subarray_assign, subarray_assign_setup; ops = 2 * 256^2)
+
+# A minimal user array type (IndexLinear, splatted getindex): the AbstractArray fallbacks
+# that package arrays rely on for copy, broadcast, reductions and views (#52070)
+struct WrapArr{T,N} <: AbstractArray{T,N}
+    data::Array{T,N}
+end
+Base.size(a::WrapArr) = size(a.data)
+Base.IndexStyle(::Type{<:WrapArr}) = IndexLinear()
+Base.getindex(a::WrapArr, i...) = getindex(a.data, i...)
+Base.setindex!(a::WrapArr, v, i...) = setindex!(a.data, v, i...)
+Base.similar(a::WrapArr, ::Type{T}, dims::Dims) where {T} = WrapArr(similar(a.data, T, dims))
+custom_array_setup() = WrapArr(reshape(rand_f64(SplitMix(24), 2^16), 256, 256))
+function custom_array(a)
+    b = copy(a)
+    c = a .* 2.0 .+ b
+    return sum(c) + maximum(view(a, 2:255, 2:255))
+end
+bench(custom_array, custom_array_setup; ops = 2^16)
+
+# Reductions along leading, inner and trailing dimensions (mapreducedim!)
+reduce_dims_setup() = reshape(rand_f64(SplitMix(25), 64 * 64 * 32), 64, 64, 32)
+function reduce_dims(A)
+    a = sum(A; dims = 1)
+    b = sum(abs2, A; dims = 2)
+    c = sum(A; dims = 3)
+    d = maximum(A; dims = (1, 3))
+    return a[1] + b[1] + c[1] + d[1]
+end
+bench(reduce_dims, reduce_dims_setup; ops = 4 * 64 * 64 * 32)
+
+# Logical indexing with Vector{Bool} and BitVector masks, and findall on a mask
+function logical_index_setup()
+    r = SplitMix(26)
+    x = rand_f64(r, 2^16)
+    m = rand_f64(r, 2^16) .< 0.5
+    return x, Vector{Bool}(m), BitVector(m)
+end
+function logical_index(x, m, bm)
+    a = x[m]
+    b = x[bm]
+    return length(a) + length(b) + length(findall(m)) + sum(view(x, bm))
+end
+bench(logical_index, logical_index_setup; ops = 4 * 2^16, tolerance = 0.08)
+
+# Missing values as data-frame code has them: map over two Union{Missing,Float32}
+# arrays, skipmissing reductions (#54811, #55374)
+function missing_ops_setup()
+    r = SplitMix(27)
+    f(x) = x < 0.1 ? missing : Float32(x)
+    return Union{Missing,Float32}[f(x) for x in rand_f64(r, 2^16)], Union{Missing,Float32}[f(x) for x in rand_f64(r, 2^16)]
+end
+function missing_ops(a, b)
+    c = map(*, a, b)
+    return sum(skipmissing(a)) + length(collect(skipmissing(c))) + count(ismissing, c)
+end
+bench(missing_ops, missing_ops_setup; ops = 4 * 2^16)
+
+# A deque on a Vector: pushfirst!, insert! near the front, pop! and popfirst!, which grow
+# and shrink at both ends (#56026, #58640)
+front_churn_setup() = rand_int(SplitMix(28), 2^15, 0, 10^6)
+function front_churn(xs)
+    v = Int[]
+    s = 0
+    for x in xs
+        pushfirst!(v, x)
+        insert!(v, 2, x >> 1)
+        if length(v) > 96
+            s += pop!(v) + popfirst!(v) + pop!(v)
+        end
+    end
+    return s + length(v)
+end
+bench(front_churn, front_churn_setup; ops = 2^15, tolerance = 0.06)
+
+# Stores through a raw pointer while reading a 3-d array: unless aliasing information
+# says otherwise, the array's size and data pointer are reloaded every iteration (#63782)
+function ptr_store_setup()
+    dst, src = carve(Float64, 5 * 6 * 2000, 2)
+    src .= rand_f64(SplitMix(29), length(src))
+    return dst, reshape(src, 5, 6, 2000)
+end
+function ptr_store(dst, src)
+    GC.@preserve dst begin
+        p = pointer(dst)
+        @inbounds for k in axes(src, 3), j in axes(src, 2), i in axes(src, 1)
+            idx = i + size(src, 1) * ((j - 1) + size(src, 2) * (k - 1))
+            unsafe_store!(p, unsafe_load(p, idx) - 0.5 * src[i, j, k], idx)
+        end
+    end
+    return dst[1]
+end
+bench(ptr_store, ptr_store_setup; ops = 5 * 6 * 2000)
+
 end

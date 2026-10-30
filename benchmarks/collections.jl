@@ -128,4 +128,34 @@ function long_tuples(t, h)
 end
 bench(long_tuples, long_tuples_setup; ops = 1000)
 
+
+# findall with a predicate that folds over a 7-tuple (#56309: a cliff between N=6 and N=7)
+has_one(t) = mapfoldl(==(1), |, t; init = false)
+function findall_tuples_setup()
+    v = rand_int(SplitMix(38), 7 * 2^16, 1, 64)
+    return [ntuple(j -> v[7(i-1)+j], 7) for i in 1:2^16]
+end
+findall_tuples(v) = length(findall(has_one, v))
+bench(findall_tuples, findall_tuples_setup; ops = 2^16)
+
+# Reductions with init=, which take the mapfoldl path, including over zip with a view
+# (#47216, #48792, #49763)
+reduce_init_setup() = (v = rand_f64(SplitMix(39), 2^17); (v, view(v, :)))
+reduce_init(v, w) = reduce(max, v; init = 0.0) + sum(x -> 4 / (4x - 3), v; init = 0.0) +
+                    mapfoldl(t -> t[1] * t[2], +, zip(v, w); init = 0.0)
+bench(reduce_init, reduce_init_setup; ops = 3 * 2^17)
+
+# collect and map whose element type is only known at runtime: the eltype widens partway
+# through (setindex_widen_up_to)
+function collect_widen_setup()
+    r = SplitMix(40)
+    return Any[k == 1 ? 1.5 : k for k in rand_int(r, 2^15, 1, 4)]
+end
+function collect_widen(xs)
+    a = [x + 1 for x in xs]
+    b = map(x -> x isa Int ? nothing : x, xs)
+    return length(a) + length(b) + count(isnothing, b)
+end
+bench(collect_widen, collect_widen_setup; ops = 2 * 2^15, tolerance = 0.06)
+
 end

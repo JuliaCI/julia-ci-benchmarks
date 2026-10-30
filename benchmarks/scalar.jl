@@ -133,4 +133,18 @@ function checked_convert(xi, xf)
 end
 bench(checked_convert, checked_convert_setup; ops = 2^16)
 
+
+# Literal integer powers under @fastmath and without it (#59804: x^2 under @fastmath got
+# 30x slower). Runtime exponents are left out: their cost moves by 30% between processes.
+@fastmath fnorm(x, y, z) = sqrt(x^2 + y^2 + z^2)
+pow_int_setup() = rand_f32(SplitMix(33), 2^16, 0.5, 2.0)
+function pow_int(xs)
+    s = 0.0f0
+    @inbounds for x in xs
+        s += fnorm(x, 2x, 3x) + x^3 + x^-2
+    end
+    return s
+end
+bench(pow_int, pow_int_setup; ops = 2^16)
+
 end

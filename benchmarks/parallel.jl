@@ -175,4 +175,17 @@ function full_gc_parallel_mark(roots)
 end
 bench(full_gc_parallel_mark, full_gc_parallel_mark_setup; seconds = 1.0, min_threads = 4, metric = "time", tolerance = 0.15)
 
+
+# One producer and many consumers on a buffered channel: how put! wakes waiters (#63840)
+function channel_fanout()
+    ch = Channel{Int}(64)
+    ts = [Threads.@spawn(sum(ch)) for _ in 1:16]
+    for i in 1:2^13
+        put!(ch, i)
+    end
+    close(ch)
+    return sum(fetch, ts)
+end
+bench(channel_fanout; ops = 2^13, min_threads = 4, metric = "time", tolerance = 0.15)
+
 end
