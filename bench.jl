@@ -15,7 +15,7 @@ include(joinpath(@__DIR__, "driver", "json.jl"))
 using .BenchJSON
 
 const CATEGORIES = ["scalar", "simd", "array", "collections", "strings", "io", "dispatch",
-                    "types", "runtime", "gc", "compiler", "apps", "parallel"]
+                    "types", "runtime", "gc", "compiler", "inference", "apps", "parallel"]
 # Categories that need more than one thread
 const THREADED = Set(["parallel"])
 

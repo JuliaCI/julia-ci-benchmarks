@@ -40,15 +40,16 @@ a tuned number of calls, so a kernel should do at least ~20 µs of work. Without
 the kernel takes no arguments. `reset(args...)`, when given, runs untimed before every
 sample, for kernels that consume or mutate their input. `ops` is the number of work items
 per call and only scales the reported time per item. `metric` is what a comparison
-judges: `"cycles"` of the calling thread, or `"time"` for work that leaves it (other
-threads, parallel GC marking). `tolerance` overrides the comparison threshold.
+judges: `"cycles"` of the calling thread, `"time"` for work that leaves it (other
+threads, parallel GC marking), or `"instructions"` of the calling thread for work whose
+cycles follow heap placement too much to judge (the compiler on large inputs). `tolerance` overrides the comparison threshold.
 
 Outside a suite run (the definitions pasted into a REPL) the benchmark runs right away.
 """
 function bench(kernel, setup = () -> (); reset = nothing, ops::Int = 1,
                seconds::Real = DEFAULT_SECONDS, min_threads::Int = 1, metric::String = "cycles",
                tolerance::Real = 0.0)
-    metric in ("cycles", "time") || error("unknown metric $metric")
+    metric in ("cycles", "time", "instructions") || error("unknown metric $metric")
     name = string(nameof(kernel))
     interactive = isempty(CATEGORY[])
     full = interactive ? name : string(CATEGORY[], "/", name)

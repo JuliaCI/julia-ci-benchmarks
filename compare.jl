@@ -30,13 +30,15 @@ include(joinpath(@__DIR__, "driver", "json.jl"))
 using .BenchJSON
 using Printf
 
-const DEFAULT_TOL = Dict("cycles" => 0.03, "time" => 0.06)
-const FLOOR = Dict("cycles" => 5_000, "time" => 2_000)  # cycles, ns
+const DEFAULT_TOL = Dict("cycles" => 0.03, "time" => 0.06, "instructions" => 0.01)
+const FLOOR = Dict("cycles" => 5_000, "time" => 2_000, "instructions" => 10_000)  # cycles, ns, instructions
 const INSTR_TOL = 0.005
 # Measured between consecutive master builds that differ only in code no benchmark runs:
 # up to 12% in cycles with identical instructions (sysimage Dict, sort, exp, sincos)
 const LAYOUT_TOL = 0.15
 const SUITE_TOL = 0.015
+# Allocation counts: a change counts above this fraction (and at least one allocation)
+const ALLOC_TOL = 0.001
 
 struct Cell
     value::Float64
@@ -54,13 +56,14 @@ end
 
 function metric_of(r)
     m = r["metric"]
-    m == "cycles" && haskey(r["counters"], "cycles") ? "cycles" : "time"
+    m in ("cycles", "instructions") && haskey(r["counters"], m) ? m : "time"
 end
 
 function cell(r, m)
     c = r["counters"]
     t = low(r["times_ns"])
-    v = m == "cycles" ? low(c["cycles"]) : t
+    # Instruction counts have no low outliers to guard against; their minimum is exact
+    v = m == "cycles" ? low(c["cycles"]) : m == "instructions" ? Float64(minimum(c["instructions"])) : t
     ins = haskey(c, "instructions") ? Float64(minimum(c["instructions"])) : nothing
     return Cell(v, t, ins, r["allocs"], r["bytes"])
 end
@@ -133,7 +136,8 @@ fmt_time(t) = t < 1e3 ? @sprintf("%.0f ns", t) : t < 1e6 ? @sprintf("%.1f µs", 
               t < 1e9 ? @sprintf("%.2f ms", t / 1e6) : @sprintf("%.2f s", t / 1e9)
 fmt_count(c) = c < 1e4 ? @sprintf("%.0f", c) : c < 1e7 ? @sprintf("%.1fk", c / 1e3) :
                c < 1e10 ? @sprintf("%.2fM", c / 1e6) : @sprintf("%.2fG", c / 1e9)
-fmt_value(v, metric) = metric == "cycles" ? fmt_count(v) * " cyc" : fmt_time(v)
+fmt_value(v, metric) = metric == "cycles" ? fmt_count(v) * " cyc" : metric == "instructions" ? fmt_count(v) * " ins" : fmt_time(v)
+fmt_bytes(b) = b < 1024 ? "$b B" : b < 1024^2 ? @sprintf("%.1f KiB", b / 1024) : @sprintf("%.1f MiB", b / 1024^2)
 fmt_pct(r) = @sprintf("%+.1f%%", 100 * (r - 1))
 geomean(xs) = exp(sum(log, xs) / length(xs))
 
@@ -151,7 +155,7 @@ function judge(cells, info, base, head)
         bi = [arms[base][k].instructions for k in blocks]
         hi = [arms[head][k].instructions for k in blocks]
         # Only the calling thread is counted, which says little about work spread over threads
-        instr_ratio = inf.metric != "cycles" || any(isnothing, bi) || any(isnothing, hi) ? nothing :
+        instr_ratio = inf.metric == "time" || any(isnothing, bi) || any(isnothing, hi) ? nothing :
                       minimum(hi) / minimum(bi)
         # Instruction counts repeat exactly unless GC or system calls do work on the calling
         # thread; a benchmark whose own blocks disagree has no usable instruction signal
@@ -178,11 +182,19 @@ function judge(cells, info, base, head)
         end
         ab = minimum(arms[base][k].allocs for k in blocks)
         ah = minimum(arms[head][k].allocs for k in blocks)
+        # Allocation counts repeat almost exactly between processes and builds (compiler
+        # workloads differ by a few in 800k); scheduling makes them vary in threaded ones
+        abx = maximum(arms[base][k].allocs for k in blocks)
+        ahx = maximum(arms[head][k].allocs for k in blocks)
+        alloc_change = inf.metric == "time" || abs(ah - ab) <= max(0, ALLOC_TOL * ab) ? "" :
+                       ah > abx ? "more" : ahx < ab ? "fewer" : ""
         push!(rows, (; name, category = inf.category, metric = inf.metric, mixed_units = inf.mixed_units, tolerance = tol, verdict,
                      base = minimum(b), head = minimum(h), ratio = minimum(h) / minimum(b), ratios,
                      base_time = minimum(arms[base][k].time for k in blocks),
                      head_time = minimum(arms[head][k].time for k in blocks),
-                     instr_ratio, instr_changed, allocs_base = ab, allocs_head = ah, blocks = length(blocks)))
+                     instr_ratio, instr_changed, allocs_base = ab, allocs_head = ah, alloc_change,
+                     bytes_base = minimum(arms[base][k].bytes for k in blocks),
+                     bytes_head = minimum(arms[head][k].bytes for k in blocks), blocks = length(blocks)))
     end
     return rows
 end
@@ -259,6 +271,17 @@ function compare_report(io, rows, suites, incomplete, skipped, meta, base, head,
             println(io, "| $(s.category) (geomean) | $(fmt_pct(s.geomean)) | $(s.control === nothing ? "" : fmt_pct(s.control.geomean)) |")
         end
         println(io, "\n</details>\n")
+    end
+    allocs = filter(r -> !isempty(r.alloc_change), rows)
+    if !isempty(allocs)
+        println(io, "**Allocations per call changed** in $(length(allocs)) benchmarks (exact counts; reported, not judged):\n")
+        println(io, "| | Benchmark | Base | Head | Bytes base | Bytes head |")
+        println(io, "|:-:|:--|--:|--:|--:|--:|")
+        for r in sort(allocs; by = r -> -abs(r.allocs_head - r.allocs_base))
+            mark = r.alloc_change == "more" ? "🟠" : "🔵"
+            println(io, "| $mark | `$(r.name)` | $(r.allocs_base) | $(r.allocs_head) | $(fmt_bytes(r.bytes_base)) | $(fmt_bytes(r.bytes_head)) |")
+        end
+        println(io)
     end
     instr = filter(r -> r.instr_changed && r.verdict == "same", rows)
     if !isempty(instr)

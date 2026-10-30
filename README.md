@@ -3,7 +3,7 @@
 A runtime benchmark suite for Julia itself, small enough to run on every commit to
 `master` and on pull requests, on the same macOS aarch64 machine as the TTFX job. It
 complements [BaseBenchmarks.jl](https://github.com/JuliaCI/BaseBenchmarks.jl): instead of
-thousands of overlapping cases, it has 145 benchmarks, each chosen to cover a code path
+thousands of overlapping cases, it has 158 benchmarks, each chosen to cover a code path
 the others do not. The suite targets what changes when *Julia* changes: codegen and
 aliasing information, LLVM upgrades, inference, lowering, the runtime, the GC and the
 scheduler. Library performance (LinearAlgebra, SparseArrays, ...) is out of scope.
@@ -89,7 +89,20 @@ do not explain (the same direction, at least half the size) must exceed 15%, whi
 cleared all five pairs; a change with an instruction change behind it keeps the
 benchmark's own tolerance. Runtime dispatch goes through a call cache keyed on the
 caller's address, so the dynamic-dispatch kernels move a few percent in instructions as
-well and use 6%. A comparison of two builds takes about 6.5 minutes on the M4 Pro.
+well and use 6%. A comparison of two builds takes about 8 minutes on the M4 Pro.
+
+**Inference is judged on instructions.** The `inference` category (ported from
+BaseBenchmarks: an `AbstractInterpreter` with its own cache infers whole call graphs,
+Base's included) allocates millions of objects per sample, and its cycles vary 2-11%
+between processes even after a full collection before each sample. Its instruction counts
+stay within 0.5%, and compiler work moved at most 0.2% in instructions across the
+layout-only build pairs, so these benchmarks use `metric = "instructions"` with a 1%
+tolerance.
+
+**Allocations are reported, not judged.** Every sample records the allocation count and
+bytes. Counts repeat almost exactly between processes and builds, so a change of more
+than 0.1% between the arms of a single-threaded benchmark is listed in its own section of
+the report (the parallel and GC benchmarks are left out, scheduling moves their counts).
 
 **A bespoke driver.** BenchmarkTools and Chairmarks were measured against the driver
 here on the same kernels. With equal time budgets their estimates are no more stable
