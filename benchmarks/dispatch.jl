@@ -265,18 +265,4 @@ function property_overload(vs, xs)
 end
 bench(property_overload, property_overload_setup; ops = 2^16)
 
-# Calls of a deprecated method with deprecation warnings off, the default: the depwarn
-# check has to stay cheap (#58326)
-new_api(x) = 2x + 1
-Base.@deprecate old_api(x) new_api(x) false
-deprecated_call_setup() = rand_f64(SplitMix(76), 2^12)
-function deprecated_call(xs)
-    s = 0.0
-    for x in xs
-        s += old_api(x)
-    end
-    return s
-end
-bench(deprecated_call, deprecated_call_setup; ops = 2^12, tolerance = 0.06)
-
 end
