@@ -132,6 +132,18 @@ end
     $([:(oc = Base.Experimental.@opaque (i, x, y) -> (x .= Float64(i); y += sum(x)); oc($i, x, y)) for i in 1:100]...)
     return y
 end
+# Many entries in the const-prop cache for one method: a callee that can't be concretely
+# evaluated, called with many distinct constants (julia#64707)
+const constprop_sink = Ref(0.0)
+Base.@constprop :aggressive function constprop_target(x::Float64)
+    constprop_sink[] = x
+    return x > 0 ? x : -x
+end
+@eval function many_constprop_entries()
+    y = 0.0
+    $([:(y += constprop_target($(Float64(i)))) for i in 1:1000]...)
+    return y
+end
 # End of the shared part.
 
 # Abstract interpretation alone (no optimization, so no concrete evaluation either) of
@@ -157,6 +169,9 @@ bench(infer_many_method_matches; seconds = 0.25, metric = "instructions", reset 
 
 infer_many_const_calls() = infer(many_const_calls, ())
 bench(infer_many_const_calls; seconds = 0.25, metric = "instructions", reset = GC.gc)
+
+infer_many_constprop_entries() = infer(many_constprop_entries, ())
+bench(infer_many_constprop_entries; seconds = 0.25, metric = "instructions", reset = GC.gc)
 
 infer_many_invoke_calls() = infer(many_invoke_calls, (Vector{Float64},))
 bench(infer_many_invoke_calls; seconds = 0.25, metric = "instructions", reset = GC.gc)
