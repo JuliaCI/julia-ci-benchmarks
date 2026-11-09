@@ -19,6 +19,7 @@ struct Bench
     min_threads::Int
     metric::String
     tolerance::Float64
+    instr_tolerance::Float64
 end
 
 const SUITE = Bench[]
@@ -32,7 +33,7 @@ const MIN_SAMPLES = 5
 const MAX_SAMPLES = 300
 
 """
-    bench(kernel, [setup]; reset, ops, seconds, min_threads, metric, tolerance)
+    bench(kernel, [setup]; reset, ops, seconds, min_threads, metric, tolerance, instr_tolerance)
 
 Register the benchmark `<category>/<name of kernel>`. `args = setup()` is built once, a
 tuple of arguments (or a single one), and one sample is one call `kernel(args...)`, never
@@ -43,17 +44,21 @@ per call and only scales the reported time per item. `metric` is what a comparis
 judges: `"cycles"` of the calling thread, `"time"` for work that leaves it (other
 threads, parallel GC marking), or `"instructions"` of the calling thread for work whose
 cycles follow heap placement too much to judge (the compiler on large inputs). `tolerance` overrides the comparison threshold.
+`instr_tolerance` is how far the retired instructions may move with nothing changed but the
+code layout (method caches, `IdDict`s and symbol tables hash addresses): a change within it is
+not reported, nor counts as explaining a change in cycles.
 
 Outside a suite run (the definitions pasted into a REPL) the benchmark runs right away.
 """
 function bench(kernel, setup = () -> (); reset = nothing, ops::Int = 1,
                seconds::Real = DEFAULT_SECONDS, min_threads::Int = 1, metric::String = "cycles",
-               tolerance::Real = 0.0)
+               tolerance::Real = 0.0, instr_tolerance::Real = 0.0)
     metric in ("cycles", "time", "instructions") || error("unknown metric $metric")
     name = string(nameof(kernel))
     interactive = isempty(CATEGORY[])
     full = interactive ? name : string(CATEGORY[], "/", name)
-    b = Bench(full, kernel, setup, reset, ops, Float64(seconds), min_threads, metric, Float64(tolerance))
+    b = Bench(full, kernel, setup, reset, ops, Float64(seconds), min_threads, metric, Float64(tolerance),
+              Float64(instr_tolerance))
     # Outside a suite load (a block pasted into the REPL), run it right away
     interactive && return Base.invokelatest(run_interactive, b)
     any(x -> x.name == full, SUITE) && error("duplicate benchmark $full")
@@ -103,7 +108,8 @@ function run_one(b::Bench, backend::CounterBackend, seconds_scale::Float64)
     return (; status = "ok", error = nothing, ops = b.ops, times_ns = times,
             min_ns = minimum(times), median_ns = median_of(times),
             allocs = minimum(allocs), bytes = minimum(bytes), gc_ns = gc_ns,
-            counters = counters, metric = b.metric, tolerance = b.tolerance == 0 ? nothing : b.tolerance)
+            counters = counters, metric = b.metric, tolerance = b.tolerance == 0 ? nothing : b.tolerance,
+            instr_tolerance = b.instr_tolerance == 0 ? nothing : b.instr_tolerance)
 end
 
 function measure(kernel::F, reset::R, args::A, backend::CounterBackend, budget::Int) where {F,R,A}

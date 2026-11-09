@@ -59,7 +59,7 @@ function apply_type(ps, _)
     end
     return n
 end
-bench(apply_type, apply_type_setup; ops = 4096, reset = (ps, r) -> shuffle_det!(r, ps))
+bench(apply_type, apply_type_setup; instr_tolerance = 0.02, ops = 4096, reset = (ps, r) -> shuffle_det!(r, ps))
 
 # Method table matching (jl_matching_methods) and hasmethod, as reflection and inference
 # do it, including building each signature
@@ -79,7 +79,7 @@ function method_lookup(qs, _)
     end
     return n
 end
-bench(method_lookup, method_lookup_setup; ops = 1536, reset = (qs, r) -> shuffle_det!(r, qs))
+bench(method_lookup, method_lookup_setup; instr_tolerance = 0.03, ops = 1536, reset = (qs, r) -> shuffle_det!(r, qs))
 
 # Type printing, alias search included: error messages, the REPL, stack traces
 show_types_setup() = (copy(TYPES), Vector{String}(undef, 2 * length(TYPES)), SplitMix(305))
@@ -109,7 +109,7 @@ function promote_join(ps, _)
     end
     return n
 end
-bench(promote_join, promote_join_setup; ops = 3 * 4096, reset = (ps, r) -> shuffle_det!(r, ps))
+bench(promote_join, promote_join_setup; instr_tolerance = 0.04, ops = 3 * 4096, reset = (ps, r) -> shuffle_det!(r, ps))
 
 # Base.promote_op with runtime argument types, which calls inference's return_type and
 # finds the result cached (every query was answered in the warmup calls)
@@ -128,6 +128,6 @@ function promote_op_runtime(qs, _)
     end
     return n
 end
-bench(promote_op_runtime, promote_op_runtime_setup; ops = 2048, reset = (qs, r) -> shuffle_det!(r, qs))
+bench(promote_op_runtime, promote_op_runtime_setup; instr_tolerance = 0.04, ops = 2048, reset = (qs, r) -> shuffle_det!(r, qs))
 
 end

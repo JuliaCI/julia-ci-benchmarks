@@ -116,7 +116,9 @@ function bigint()
     end
     return b
 end
-bench(bigint; ops = 400, metric = "time", tolerance = 0.08)
+# Each process settles at its own level, 106 to 142 µs on the M2 CI machines with no change in
+# between, so only a change of more than that counts
+bench(bigint; ops = 400, metric = "time", tolerance = 0.3)
 
 # Young objects stored into an old Vector{Any}, then a pointer copy within it: the write
 # barrier on array stores and on copyto!, and young collections that scan the remembered

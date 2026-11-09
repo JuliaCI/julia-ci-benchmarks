@@ -239,7 +239,7 @@ const SHORT_EXPRS = ["x + 1", "f(a, b; c = 2)", "[i^2 for i in 1:10 if isodd(i)]
                      "0x1f + 1e-3 * 2im", "struct P{T} x::T end"]
 parse_short_setup() = repeat(SHORT_EXPRS, 50)
 parse_short(strs) = map(Meta.parse, strs)
-bench(parse_short, parse_short_setup; ops = 1000)
+bench(parse_short, parse_short_setup; instr_tolerance = 0.02, ops = 1000)
 
 # Method definitions evaluated one by one, lowered in the untimed reset: jl_method_def,
 # signature checks and insertion into method tables that grow to 8 methods each
@@ -254,7 +254,7 @@ function define_methods(_, state)
     end
     return m
 end
-bench(define_methods, define_methods_setup; ops = 320, seconds = 1.0, reset = (ex, state) -> (state[] = lowered_in_fresh_module(ex)))
+bench(define_methods, define_methods_setup; instr_tolerance = 0.03, ops = 320, seconds = 1.0, reset = (ex, state) -> (state[] = lowered_in_fresh_module(ex)))
 
 # Type definitions evaluated one by one, lowered in the untimed reset: jl_new_datatype,
 # field types and layout, the type cache, and the default constructors' methods
@@ -300,6 +300,6 @@ function eval_toplevel(_, state)
     end
     return m
 end
-bench(eval_toplevel, eval_toplevel_setup; ops = 900, seconds = 1.0, reset = (ex, state) -> (state[] = lowered_in_fresh_module(ex)))
+bench(eval_toplevel, eval_toplevel_setup; instr_tolerance = 0.04, ops = 900, seconds = 1.0, reset = (ex, state) -> (state[] = lowered_in_fresh_module(ex)))
 
 end

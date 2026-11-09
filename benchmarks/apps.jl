@@ -842,7 +842,7 @@ function root_finding(ps)
     end
     return s
 end
-bench(root_finding, root_finding_setup; ops = 2^12, tolerance = 0.06)
+bench(root_finding, root_finding_setup; ops = 2^12, tolerance = 0.06, instr_tolerance = 0.02)
 
 # Forward-mode automatic differentiation with a dual number type, the ForwardDiff pattern
 # without the package (#60243): a Real subtype carrying an NTuple of partials, generic
@@ -1201,6 +1201,6 @@ function imdb(lines)
     end
     return G, [centrality_mean(G, a) for a in first(sort!(collect(actor_names)), 4)]
 end
-bench(imdb, imdb_setup; ops = 6000)
+bench(imdb, imdb_setup; instr_tolerance = 0.03, ops = 6000)
 
 end

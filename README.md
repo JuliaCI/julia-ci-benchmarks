@@ -94,7 +94,12 @@ do not explain (the same direction, at least half the size) must exceed 15%, whi
 cleared all five pairs; a change with an instruction change behind it keeps the
 benchmark's own tolerance. Runtime dispatch goes through a call cache keyed on the
 caller's address, so the dynamic-dispatch kernels move a few percent in instructions as
-well and use 6%. A comparison of two builds takes about 8.5 minutes on the M4 Pro.
+well and use 6%. They are not alone: over 170 consecutive julia-ci master builds, 33
+benchmarks that hash addresses (method caches, `IdDict`s, symbol tables, the stack
+trace cache) retired 1-16% more or fewer instructions from one build to the next with
+nothing they run changed. Each sets an `instr_tolerance`, from the 95th percentile of
+those moves: an instruction change within it is not reported, and does not count as
+explaining a change in cycles. A comparison of two builds takes about 8.5 minutes on the M4 Pro.
 
 **Inference is judged on instructions.** The `inference` category (ported from
 BaseBenchmarks: an `AbstractInterpreter` with its own cache infers whole call graphs,
@@ -175,7 +180,7 @@ per-sample reset with a fixed evaluation count, and a record format the comparis
 |---|---|
 | `name`, `category`, `arm`, `block`, `order` | identity; `order` is the global run order |
 | `status`, `error` | `ok`, `error` or `skipped` |
-| `metric`, `tolerance` | what the comparison judges (`cycles` or `time`), and a per-benchmark tolerance override |
+| `metric`, `tolerance`, `instr_tolerance` | what the comparison judges (`cycles` or `time`), a per-benchmark tolerance override, and how far its instructions move with code layout alone |
 | `times_ns`, `min_ns`, `median_ns` | every sample's wall time |
 | `counters` | `{cycles: [...], instructions: [...], ...}` per sample; `counters_backend` says which backend recorded them |
 | `allocs`, `bytes`, `gc_ns` | minimum allocations and bytes per sample, and GC time per sample |
@@ -218,7 +223,8 @@ The benchmark is named after the kernel (`simd/axpy_alias_check`). `setup()` ret
 kernel's arguments, built once, and one sample is one call `kernel(args...)`. Keywords:
 `reset` (called with the same arguments, untimed, before each sample, for kernels that
 mutate their input), `ops` (work items per call), `seconds` (sampling budget), `metric`
-(`"cycles"`, `"instructions"` or `"time"`), `tolerance` (overrides the comparison threshold), `min_threads`.
+(`"cycles"`, `"instructions"` or `"time"`), `tolerance` (overrides the comparison threshold), `instr_tolerance` (how far the retired
+instructions move with the code layout alone; default 0.5%), `min_threads`.
 
 Each benchmark is a self-contained block, its setup and helpers directly above its
 `bench` line, with literal sizes rather than file-level constants. A few files

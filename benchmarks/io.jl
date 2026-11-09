@@ -16,7 +16,7 @@ function iobuffer_print(is, fs)
     end
     return io
 end
-bench(iobuffer_print, iobuffer_print_setup; ops = 8192)
+bench(iobuffer_print, iobuffer_print_setup; instr_tolerance = 0.025, ops = 8192)
 
 function readline_parse_setup()
     io = IOBuffer()
@@ -52,7 +52,7 @@ function serialize_roundtrip(recs)
     seekstart(io)
     return deserialize(io)
 end
-bench(serialize_roundtrip, serialize_roundtrip_setup; ops = 512)
+bench(serialize_roundtrip, serialize_roundtrip_setup; instr_tolerance = 0.04, ops = 512)
 
 # 4 MiB written and read back in 64 KiB chunks, then deleted
 function file_roundtrip_setup()
@@ -76,7 +76,7 @@ function file_roundtrip(path, chunk)
     rm(path; force = true)
     return n
 end
-bench(file_roundtrip, file_roundtrip_setup; ops = 64, tolerance = 0.15)
+bench(file_roundtrip, file_roundtrip_setup; ops = 64, tolerance = 0.15, instr_tolerance = 0.03)
 
 
 # Many small reads from a file: per-call overhead of read! and readbytes! on an IOStream
@@ -121,7 +121,7 @@ function show_containers(M, v, d, nt)
     end
     return String(take!(io))
 end
-bench(show_containers, show_containers_setup; ops = 24 * 8 + 200 + 64 + 16)
+bench(show_containers, show_containers_setup; instr_tolerance = 0.02, ops = 24 * 8 + 200 + 64 + 16)
 
 # Bit types written to and read back from an IOBuffer: write(io, x) of each value, buffer
 # growth, and read(io, T)

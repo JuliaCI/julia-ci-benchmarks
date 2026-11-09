@@ -25,7 +25,7 @@ function throw_catch(xs, r)
     end
     return s
 end
-bench(throw_catch, throw_catch_setup; ops = 2^11, reset = (xs, r) -> shuffle_det!(r, xs))
+bench(throw_catch, throw_catch_setup; instr_tolerance = 0.02, ops = 2^11, reset = (xs, r) -> shuffle_det!(r, xs))
 
 # try blocks that never throw, around cheap work: the cost of the handler itself
 try_nothrow_setup() = rand_f64(SplitMix(2), 2^16) .* 0.8
@@ -84,7 +84,7 @@ function deepcopy_tree_setup()
 end
 # Every node's children are reordered before each sample, so the walk differs
 deepcopy_tree(root, _, _) = deepcopy(root)
-bench(deepcopy_tree, deepcopy_tree_setup; ops = 2001,
+bench(deepcopy_tree, deepcopy_tree_setup; instr_tolerance = 0.01, ops = 2001,
       reset = (root, nodes, r) -> foreach(n -> shuffle_det!(r, n.children), nodes))
 
 # Untyped and typed globals: binding lookup and world-age partitions on every access
@@ -98,7 +98,7 @@ function global_access()
     end
     return untyped_counter + typed_counter
 end
-bench(global_access; ops = 2^16)
+bench(global_access; instr_tolerance = 0.08, ops = 2^16)
 
 function task_local_storage_rw()
     s = 0
@@ -160,7 +160,7 @@ if isdefined(Base, :ScopedValues)
         end
         return s
     end
-    bench(scoped_values; ops = 2^12)
+    bench(scoped_values; instr_tolerance = 0.03, ops = 2^12)
 end
 
 
@@ -191,7 +191,7 @@ function stacktrace_lookup_setup()
     end
 end
 stacktrace_lookup(bt) = stacktrace(bt)
-bench(stacktrace_lookup, stacktrace_lookup_setup)
+bench(stacktrace_lookup, stacktrace_lookup_setup; instr_tolerance = 0.05)
 
 # Log statements: @debug below the minimum level (the early check), @info through a
 # SimpleLogger into an IOBuffer (message and key-value formatting), and @info under
@@ -302,7 +302,7 @@ function struct_abi(xs, names, v)
     end
     return s, w
 end
-bench(struct_abi, struct_abi_setup; ops = 2 * 2^14)
+bench(struct_abi, struct_abi_setup; instr_tolerance = 0.025, ops = 2 * 2^14)
 
 # Mutable objects that never escape: allocation elimination must turn a Ref and a mutable
 # struct into registers, inside the loop and carried around it. Losing it makes every
