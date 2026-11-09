@@ -116,7 +116,9 @@ function bigint()
     end
     return b
 end
-bench(bigint; ops = 400, metric = "time", tolerance = 0.08)
+# Each process settles at its own level, 106 to 142 µs on the M2 CI machines with no change in
+# between, so only a change of more than that counts
+bench(bigint; ops = 400, metric = "time", tolerance = 0.3)
 
 # Young objects stored into an old Vector{Any}, then a pointer copy within it: the write
 # barrier on array stores and on copyto!, and young collections that scan the remembered
@@ -135,5 +137,25 @@ function array_write_barrier(a)
 end
 bench(array_write_barrier, array_write_barrier_setup; ops = 2^16, metric = "time", tolerance = 0.08,
       reset = a -> GC.gc(true), seconds = 1.0)
+
+# Young collections with many live cancellation sources linked to a parent (1.14+): the
+# pages holding them are flagged for weak processing, which a quick sweep must not
+# turn into work on every flagged old page (#63272)
+if isdefined(Base, :CancellationTokenSource)
+    function cancel_source_sweep_setup()
+        root = Base.CancellationTokenSource()
+        token = Base.CancellationToken(root)
+        keep = Any[Base.CancellationTokenSource(token) for _ in 1:2^17]
+        GC.gc(true)
+        return keep, root
+    end
+    function cancel_source_sweep(keep, root)
+        for _ in 1:8
+            GC.gc(false)
+        end
+        return keep
+    end
+    bench(cancel_source_sweep, cancel_source_sweep_setup; ops = 8, metric = "time", tolerance = 0.08)
+end
 
 end

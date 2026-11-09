@@ -3,7 +3,7 @@
 A runtime benchmark suite for Julia itself, small enough to run on every commit to
 `master` and on pull requests, on the same macOS aarch64 machine as the TTFX job. It
 complements [BaseBenchmarks.jl](https://github.com/JuliaCI/BaseBenchmarks.jl): instead of
-thousands of overlapping cases, it has 207 benchmarks, each chosen to cover a code path
+thousands of overlapping cases, it has 210 benchmarks, each chosen to cover a code path
 the others do not. The suite targets what changes when *Julia* changes: codegen and
 aliasing information, LLVM upgrades, inference, lowering, the runtime, the GC and the
 scheduler. Library performance (LinearAlgebra, SparseArrays, ...) is out of scope.
@@ -94,7 +94,12 @@ do not explain (the same direction, at least half the size) must exceed 15%, whi
 cleared all five pairs; a change with an instruction change behind it keeps the
 benchmark's own tolerance. Runtime dispatch goes through a call cache keyed on the
 caller's address, so the dynamic-dispatch kernels move a few percent in instructions as
-well and use 6%. A comparison of two builds takes about 8.5 minutes on the M4 Pro.
+well and use 6%. They are not alone: over 170 consecutive julia-ci master builds, 33
+benchmarks that hash addresses (method caches, `IdDict`s, symbol tables, the stack
+trace cache) retired 1-16% more or fewer instructions from one build to the next with
+nothing they run changed. Each sets an `instr_tolerance`, from the 95th percentile of
+those moves: an instruction change within it is not reported, and does not count as
+explaining a change in cycles. A comparison of two builds takes about 8.5 minutes on the M4 Pro.
 
 **Inference is judged on instructions.** The `inference` category (ported from
 BaseBenchmarks: an `AbstractInterpreter` with its own cache infers whole call graphs,
@@ -123,14 +128,14 @@ per-sample reset with a fixed evaluation count, and a record format the comparis
 |---|---|---|
 | `scalar` | Julia's libm (exp, log, sincos, pow, tanh, atan, cbrt, ...), vectorizable Float32 map, integer div/rem/fld/mod, Int128, Float16, Rational, float rounding and remainders, checked arithmetic and conversions, Xoshiro | cycles |
 | `simd` | reductions with and without `@simd`, Base's mapreduce, NaN-aware max/min, FMA dot, aliasing runtime checks, fused and 2-D broadcast, selects, narrow integers, gathers, tuple SLP, complex, early-exit searches, prefix scans, arrays of structs | cycles |
-| `array` | Cartesian stencil with bounds checks, loop matmul, strided views, reinterpret, permutedims, push!/Memory growth, editing in the middle, sort (float, int radix, by=, strings), searchsorted, BitArray, cat/splat, slices, float ranges, stores and copies of a `Union{Missing,Float64}` array | cycles |
+| `array` | Cartesian stencil with bounds checks, `zero` of a large matrix, loop matmul, strided views, reinterpret, permutedims, push!/Memory growth, editing in the middle, sort (float, int radix, by=, strings), searchsorted, BitArray, cat/splat, slices, float ranges, stores and copies of a `Union{Missing,Float64}` array | cycles |
 | `collections` | Dict with int, string, tuple, array and `Any` keys, Dict iteration and merge, deletion churn, IdDict, Set and BitSet operations, iterator composition and nesting, tuples longer than 32 | cycles |
 | `strings` | split/join, interpolation, number parsing and printing, Printf, regex captures, Unicode iteration, UTF-8 validation, replace/search, everyday transforms, paths, symbol interning | cycles |
 | `io` | IOBuffer print, readline and binary read/write, show of containers, Serialization, a page-cache file round trip, an in-process libuv pipe | cycles |
 | `dispatch` | abstract element types, union splitting, isbits union returns, `Any` arithmetic, boxed closures, static and dynamic kwcalls, dynamic splats, invokelatest, getproperty overloads, deprecated methods | cycles |
 | `types` | subtyping, intersection, apply_type with the type cache, method lookup, type printing, promote_type and typejoin, promote_op | cycles |
-| `runtime` | throw/catch, try without throw, backtrace lookup, logging, egal and hash, deepcopy, global and module bindings, task-local storage, `ccall` with `Ref` and `Cstring`, atomic fields, uncontended locks, ScopedValues, the calling convention for large structs and recursion, allocation elimination | cycles |
-| `gc` | binary trees, full GC of a large heap, the write barrier over many old owners and on an old array, big arrays, small arrays, finalizers, BigInt | time |
+| `runtime` | throw/catch, try without throw, backtrace lookup, logging, egal and hash, deepcopy, global and module bindings, task-local storage, `ccall` with `Ref` and `Cstring`, atomic fields, uncontended locks, ScopedValues, the calling convention for large structs and recursion, allocation elimination, tasks spawned and waited for on one thread | cycles |
+| `gc` | binary trees, full GC of a large heap, the write barrier over many old owners and on an old array, big arrays, small arrays, finalizers, BigInt, young collections with many live cancellation sources | time |
 | `compiler` | parsing (a file, many short expressions), macro expansion, lowering (whole file, closures and keywords, a large function), method and type definitions, the top-level interpreter, inference of a workload and of Base for a new type, first call, LLVM on a large function, method invalidation | cycles |
 | `apps` | n-body, Mandelbrot, spectral norm, fannkuch, a JSON parser, a bytecode interpreter, LU with bounds checks, RK4 on tuples, BFS, spell checking, root finding with closures, dual-number AD, a Go engine, a 2-D seismic FDTD, actor centrality over a graph of mutable nodes | cycles |
 | `parallel` (4 threads) | spawn/fetch, nested spawn, static `@threads`, rebalancing an imbalanced loop (`:greedy`), channels (ping-pong, buffered), lock and atomic contention, task switches, threaded allocation, parallel marking of a broad forest | time |
@@ -175,7 +180,7 @@ per-sample reset with a fixed evaluation count, and a record format the comparis
 |---|---|
 | `name`, `category`, `arm`, `block`, `order` | identity; `order` is the global run order |
 | `status`, `error` | `ok`, `error` or `skipped` |
-| `metric`, `tolerance` | what the comparison judges (`cycles` or `time`), and a per-benchmark tolerance override |
+| `metric`, `tolerance`, `instr_tolerance` | what the comparison judges (`cycles` or `time`), a per-benchmark tolerance override, and how far its instructions move with code layout alone |
 | `times_ns`, `min_ns`, `median_ns` | every sample's wall time |
 | `counters` | `{cycles: [...], instructions: [...], ...}` per sample; `counters_backend` says which backend recorded them |
 | `allocs`, `bytes`, `gc_ns` | minimum allocations and bytes per sample, and GC time per sample |
@@ -218,7 +223,8 @@ The benchmark is named after the kernel (`simd/axpy_alias_check`). `setup()` ret
 kernel's arguments, built once, and one sample is one call `kernel(args...)`. Keywords:
 `reset` (called with the same arguments, untimed, before each sample, for kernels that
 mutate their input), `ops` (work items per call), `seconds` (sampling budget), `metric`
-(`"cycles"`, `"instructions"` or `"time"`), `tolerance` (overrides the comparison threshold), `min_threads`.
+(`"cycles"`, `"instructions"` or `"time"`), `tolerance` (overrides the comparison threshold), `instr_tolerance` (how far the retired
+instructions move with the code layout alone; default 0.5%), `min_threads`.
 
 Each benchmark is a self-contained block, its setup and helpers directly above its
 `bench` line, with literal sizes rather than file-level constants. A few files

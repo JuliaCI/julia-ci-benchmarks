@@ -95,8 +95,10 @@ function collect_cells(recs)
         # keeps no tolerance tighter than time's
         tol = something(r["tolerance"], DEFAULT_TOL[m])
         m == "time" && r["metric"] != "time" && (tol = max(tol, DEFAULT_TOL["time"]))
+        # Results of suites from before `instr_tolerance` lack the field
+        itol = something(get(r, "instr_tolerance", nothing), INSTR_TOL)
         info[name] = (; category = r["category"], metric = m, declared = r["metric"], ops = r["ops"],
-                      mixed_units = length(units[name]) > 1, tolerance = tol)
+                      mixed_units = length(units[name]) > 1, tolerance = tol, instr_tolerance = itol)
     end
     return cells, info, errors, skipped
 end
@@ -166,15 +168,20 @@ function judge(cells, info, base, head, nblocks)
         # thread; a benchmark whose own blocks disagree has no usable instruction signal
         spread(v) = (maximum(v) - minimum(v)) / minimum(v)
         instr_stable = instr_ratio !== nothing && spread(bi) <= INSTR_TOL / 2 && spread(hi) <= INSTR_TOL / 2
-        instr_changed = instr_stable && abs(instr_ratio - 1) > INSTR_TOL &&
-                        all(k -> abs(hi[k] / bi[k] - 1) > INSTR_TOL, eachindex(blocks))
+        # Kernels that hash addresses (method caches, IdDicts, symbol tables) retire a few
+        # percent more or fewer instructions with the code layout alone; their own
+        # instr_tolerance says how many
+        itol = inf.instr_tolerance
+        instr_changed = instr_stable && abs(instr_ratio - 1) > itol &&
+                        all(k -> abs(hi[k] / bi[k] - 1) > itol, eachindex(blocks))
         tol = inf.tolerance
         # Code placement differs between any two builds, including the sysimage code a kernel
         # runs, and every block shares it. Without an instruction change to explain it, a
         # cycles change must exceed LAYOUT_TOL.
         if inf.metric == "cycles" && instr_ratio !== nothing
             moved = log(sort(ratios)[cld(length(ratios), 2)])
-            explained = instr_stable && log(instr_ratio) * moved > 0 && abs(log(instr_ratio)) >= abs(moved) / 2
+            explained = instr_stable && abs(instr_ratio - 1) > itol && log(instr_ratio) * moved > 0 &&
+                        abs(log(instr_ratio)) >= abs(moved) / 2
             explained || (tol = max(tol, LAYOUT_TOL))
         end
         floor_ok = abs(minimum(h) - minimum(b)) >= FLOOR[inf.metric]

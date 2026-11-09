@@ -56,7 +56,7 @@ function dict_any(ks, pool, _)
     end
     s
 end
-bench(dict_any, dict_any_setup; ops = 2^15, reset = (ks, pool, r) -> shuffle_det!(r, ks))
+bench(dict_any, dict_any_setup; instr_tolerance = 0.02, ops = 2^15, reset = (ks, pool, r) -> shuffle_det!(r, ks))
 
 # Deletion and reinsertion at a fixed population: tombstones, probing past deleted slots
 # and the rehash that clears them. Reset rebuilds the Dict, so every sample starts alike.
@@ -91,7 +91,7 @@ function iddict(objs, _)
     end
     s
 end
-bench(iddict, iddict_setup; ops = 2^15, reset = (objs, r) -> shuffle_det!(r, objs))
+bench(iddict, iddict_setup; instr_tolerance = 0.02, ops = 2^15, reset = (objs, r) -> shuffle_det!(r, objs))
 
 function set_ops_setup()
     r = SplitMix(4)
@@ -126,7 +126,7 @@ function long_tuples(t, h)
     end
     s
 end
-bench(long_tuples, long_tuples_setup; ops = 1000)
+bench(long_tuples, long_tuples_setup; instr_tolerance = 0.02, ops = 1000)
 
 
 # findall with a predicate that folds over a 7-tuple (#56309: a cliff between N=6 and N=7)
@@ -157,7 +157,7 @@ function collect_widen(xs, _)
     b = map(x -> x isa Int ? nothing : x, xs)
     return a, b
 end
-bench(collect_widen, collect_widen_setup; ops = 2 * 2^16, tolerance = 0.06,
+bench(collect_widen, collect_widen_setup; ops = 2 * 2^16, tolerance = 0.06, instr_tolerance = 0.04,
       reset = (xs, r) -> shuffle_det!(r, view(xs, 4:length(xs))))
 
 # Arrays as keys and hashed values: a Dict{Vector{Int}} filled and then queried with

@@ -392,4 +392,10 @@ end
 sort_strings(v, x) = sort!(v)
 bench(sort_strings, sort_strings_setup; ops = 2^14, reset = (v, x) -> copyto!(v, x))
 
+# zero of a large matrix: a fresh 8 MiB array of zeros, which 1.12 took from zeroed pages
+# like `zeros` and later versions fill (#61870)
+zero_matrix_setup() = ones(1024, 1024)
+zero_matrix(a) = zero(a)
+bench(zero_matrix, zero_matrix_setup; ops = 1024^2)
+
 end

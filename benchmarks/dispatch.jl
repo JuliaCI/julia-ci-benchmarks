@@ -79,7 +79,7 @@ function any_arith(xs, _)
     end
     return s
 end
-bench(any_arith, any_arith_setup; ops = 2^15, tolerance = 0.06, reset = (xs, r) -> shuffle_det!(r, xs))
+bench(any_arith, any_arith_setup; ops = 2^15, tolerance = 0.06, instr_tolerance = 0.08, reset = (xs, r) -> shuffle_det!(r, xs))
 
 # A captured variable that is reassigned becomes a Core.Box; lowering decides this
 boxed_closure_setup() = rand_f64(SplitMix(4), 2^16)
@@ -91,7 +91,7 @@ function boxed_closure(xs)
     end
     return acc
 end
-bench(boxed_closure, boxed_closure_setup; ops = 2^16)
+bench(boxed_closure, boxed_closure_setup; instr_tolerance = 0.02, ops = 2^16)
 
 # Keyword calls with runtime keyword sets: kwcall, NamedTuple merging, the kwsorter. The
 # (value, keyword set) pairs are reshuffled every sample.
@@ -111,7 +111,7 @@ function kwcall_dynamic(xs, kws, which, _)
     end
     return s
 end
-bench(kwcall_dynamic, kwcall_dynamic_setup; ops = 2^14, tolerance = 0.06,
+bench(kwcall_dynamic, kwcall_dynamic_setup; ops = 2^14, tolerance = 0.06, instr_tolerance = 0.07,
       reset = (xs, kws, which, r) -> shuffle_det!(r, xs, which))
 
 # Splatting runtime-length collections goes through Core._apply_iterate. The vectors are
@@ -127,7 +127,7 @@ function splat_dynamic(vs, _)
     end
     return s
 end
-bench(splat_dynamic, splat_dynamic_setup; ops = 2^13, tolerance = 0.06, reset = (vs, r) -> shuffle_det!(r, vs))
+bench(splat_dynamic, splat_dynamic_setup; ops = 2^13, tolerance = 0.06, instr_tolerance = 0.09, reset = (vs, r) -> shuffle_det!(r, vs))
 
 # invokelatest: the world-age escape hatch used by REPL, callbacks and plugins
 invokelatest_calls_setup() = rand_f64(SplitMix(7), 2^14)
@@ -138,7 +138,7 @@ function invokelatest_calls(xs)
     end
     return s
 end
-bench(invokelatest_calls, invokelatest_calls_setup; ops = 2^14, tolerance = 0.06)
+bench(invokelatest_calls, invokelatest_calls_setup; ops = 2^14, tolerance = 0.06, instr_tolerance = 0.02)
 
 
 # An accumulator that starts as an Int and becomes a Float64: a Union{Int,Float64}
@@ -195,7 +195,7 @@ function function_tuple(xs, ys)
     end
     return s
 end
-bench(function_tuple, function_tuple_setup; ops = 2^12, tolerance = 0.06)
+bench(function_tuple, function_tuple_setup; ops = 2^12, tolerance = 0.06, instr_tolerance = 0.09)
 
 # A parametric constructor called on values of unknown type: dispatch on Type{Box},
 # apply_type and allocation at runtime (#60701)
@@ -216,7 +216,7 @@ function dynamic_ctor(xs, out, _)
     end
     return out
 end
-bench(dynamic_ctor, dynamic_ctor_setup; ops = 2^14, tolerance = 0.06, reset = (xs, out, r) -> shuffle_det!(r, xs))
+bench(dynamic_ctor, dynamic_ctor_setup; ops = 2^14, tolerance = 0.06, instr_tolerance = 0.09, reset = (xs, out, r) -> shuffle_det!(r, xs))
 
 # Keyword calls whose types are known, into functions that are not inlined: the kwcall
 # entry and its NamedTuple, defaults filled in the callee, and keywords forwarded with

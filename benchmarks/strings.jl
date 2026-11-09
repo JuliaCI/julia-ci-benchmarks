@@ -27,7 +27,7 @@ function split_join(rows, out)
     end
     return out
 end
-bench(split_join, split_join_setup; ops = 4096)
+bench(split_join, split_join_setup; instr_tolerance = 0.04, ops = 4096)
 
 interpolate_setup() = (rand_int(SplitMix(2), 4096, 0, 10^9), rand_f64(SplitMix(3), 4096), Vector{String}(undef, 4096))
 function interpolate(ints, floats, out)
@@ -36,7 +36,7 @@ function interpolate(ints, floats, out)
     end
     return out
 end
-bench(interpolate, interpolate_setup; ops = 4096)
+bench(interpolate, interpolate_setup; instr_tolerance = 0.09, ops = 4096)
 
 function parse_numbers_setup()
     r = SplitMix(4)
@@ -129,7 +129,7 @@ function symbol_intern(strs, out)
     end
     return out
 end
-bench(symbol_intern, symbol_intern_setup; ops = 8192)
+bench(symbol_intern, symbol_intern_setup; instr_tolerance = 0.02, ops = 8192)
 
 
 # Small strings from integers: string(k), other bases, padding, mixed concatenation
