@@ -358,4 +358,16 @@ end
 recursive_calls(n, t) = fibr(n) + walk(t, 0)
 bench(recursive_calls, recursive_calls_setup)
 
+# Tasks spawned and waited for on a single thread, as `@sync` with `Threads.@spawn` does
+# under `-t 1`: each finished task's `wait` must go straight to the next queued task
+# without polling libuv (#63048)
+function task_spawn_wait()
+    ts = Vector{Task}(undef, 256)
+    @sync for i in 1:256
+        ts[i] = Threads.@spawn i
+    end
+    return ts
+end
+bench(task_spawn_wait; ops = 256)
+
 end
