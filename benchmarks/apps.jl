@@ -1203,9 +1203,8 @@ function imdb(lines)
 end
 bench(imdb, imdb_setup; instr_tolerance = 0.03, ops = 6000)
 
-# Fully unrolled code compiles to one basic block of thousands of instructions, where LLVM's
-# scheduling and vectorizer heuristics run near their size budgets (unrolled_*). These are
-# the kernels that compile-time limits on huge blocks would slow down, if anything.
+# Fully unrolled code compiles to one basic block of thousands of instructions. Limits on how
+# much work LLVM does on such blocks make this code slower to run, so these kernels guard them.
 
 # A generated ODE right-hand side, as ModelingToolkit and Symbolics emit: 400 independent
 # output expressions over the state and parameters in one straight-line function
