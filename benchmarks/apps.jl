@@ -1203,4 +1203,103 @@ function imdb(lines)
 end
 bench(imdb, imdb_setup; instr_tolerance = 0.03, ops = 6000)
 
+# Fully unrolled code compiles to one basic block of thousands of instructions. Limits on how
+# much work LLVM does on such blocks make this code slower to run, so these kernels guard them.
+
+# A generated ODE right-hand side, as ModelingToolkit and Symbolics emit: 400 independent
+# output expressions over the state and parameters in one straight-line function
+function generated_rhs_expr(n, m, np)
+    r = SplitMix(380)
+    pick(k) = 1 + Int(Driver.next!(r) % UInt64(k))
+    function term()
+        k = pick(3)
+        k == 1 && return :(u[$(pick(m))])
+        k == 2 && return :(p[$(pick(np))])
+        return :(u[$(pick(m))] * p[$(pick(np))])
+    end
+    function ex(d)
+        d == 0 && return term()
+        k = pick(4)
+        k == 1 && return Expr(:call, (:sin, :exp, :sqrt, :abs)[pick(4)], :(abs($(ex(d - 1))) + 0.1))
+        return Expr(:call, (:+, :-, :*)[pick(3)], ex(d - 1), ex(d - 1))
+    end
+    body = [:(du[$i] = $(ex(3))) for i in 1:n]
+    return :(@noinline function generated_rhs!(du, u, p)
+        @inbounds begin $(body...) end
+        return du
+    end)
+end
+@eval $(generated_rhs_expr(400, 100, 16))
+function unrolled_generated_rhs_setup()
+    U = reshape(rand_f64(SplitMix(381), 100 * 32, -1, 1), 100, 32)
+    return zeros(400, 32), U, rand_f64(SplitMix(382), 16)
+end
+function unrolled_generated_rhs(DU, U, p)
+    for j in axes(U, 2)
+        generated_rhs!(view(DU, :, j), view(U, :, j), p)
+    end
+    return DU
+end
+bench(unrolled_generated_rhs, unrolled_generated_rhs_setup; ops = 32)
+
+# Keccak-f[1600] with all 24 rounds unrolled over an NTuple{25,UInt64}, as hash packages
+# write it (KangarooTwelve, SHA3)
+const KECCAK_RC = (0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
+    0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+    0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
+    0x000000008000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003,
+    0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
+    0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008)
+const KECCAK_ROT = (0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39,
+    41, 45, 15, 21, 8, 18, 2, 61, 56, 14)
+function keccak_expr()
+    a = [Symbol(:a0_, i) for i in 0:24]
+    body = Any[:(($(a...),) = st)]
+    for round in 1:24
+        c = [Symbol(:c, round, :_, x) for x in 0:4]
+        for x in 0:4
+            push!(body, :($(c[x+1]) = $(a[x+1]) ⊻ $(a[x+6]) ⊻ $(a[x+11]) ⊻ $(a[x+16]) ⊻ $(a[x+21])))
+        end
+        t = [Symbol(:t, round, :_, i) for i in 0:24]
+        for x in 0:4, y in 0:4
+            d = :($(c[mod(x - 1, 5)+1]) ⊻ bitrotate($(c[mod(x + 1, 5)+1]), 1))
+            push!(body, :($(t[x+5y+1]) = bitrotate($(a[x+5y+1]) ⊻ $d, $(KECCAK_ROT[x+5y+1]))))
+        end
+        b = Vector{Symbol}(undef, 25)
+        for x in 0:4, y in 0:4
+            b[y+5*mod(2x + 3y, 5)+1] = t[x+5y+1]
+        end
+        a = [Symbol(:a, round, :_, i) for i in 0:24]
+        for x in 0:4, y in 0:4
+            push!(body, :($(a[x+5y+1]) = $(b[x+5y+1]) ⊻ (~$(b[mod(x + 1, 5)+5y+1]) & $(b[mod(x + 2, 5)+5y+1]))))
+        end
+        push!(body, :($(a[1]) ⊻= $(KECCAK_RC[round])))
+    end
+    return :(@noinline function keccak_f1600(st::NTuple{25,UInt64})
+        $(body...)
+        return ($(a...),)
+    end)
+end
+@eval $(keccak_expr())
+function unrolled_keccak_setup()
+    r = SplitMix(383)
+    return [ntuple(_ -> Driver.next!(r), 25) for _ in 1:256], Vector{NTuple{25,UInt64}}(undef, 256)
+end
+unrolled_keccak(sts, out) = map!(keccak_f1600, out, sts)
+bench(unrolled_keccak, unrolled_keccak_setup; ops = 256)
+
+# 16x16 matrix products on tuples, unrolled into 4096 multiply-adds each, as StaticArrays does
+function tuple_matmul_expr(n)
+    c = [Expr(:call, :+, (:(A[$(i + n * (k - 1))] * B[$(k + n * (j - 1))]) for k in 1:n)...) for i in 1:n, j in 1:n]
+    return :(@inline tuple_matmul(A::NTuple{$(n * n),Float64}, B::NTuple{$(n * n),Float64}) = ($(c...),))
+end
+@eval $(tuple_matmul_expr(16))
+@noinline tuple_mat3(A, B) = map(+, tuple_matmul(tuple_matmul(A, B), A), tuple_matmul(B, A))
+function unrolled_tuple_matmul_setup()
+    r = SplitMix(384)
+    return [Tuple(rand_f64(r, 256, -1, 1)) for _ in 1:32], [Tuple(rand_f64(r, 256, -1, 1)) for _ in 1:32], Vector{NTuple{256,Float64}}(undef, 32)
+end
+unrolled_tuple_matmul(As, Bs, out) = map!(tuple_mat3, out, As, Bs)
+bench(unrolled_tuple_matmul, unrolled_tuple_matmul_setup; ops = 32)
+
 end
