@@ -126,17 +126,22 @@ function searchsorted_random(hay, q, _)
 end
 bench(searchsorted_random, searchsorted_random_setup; ops = 2^14, reset = (hay, q, r) -> shuffle_det!(r, q))
 
+# `findall` leaves its inner loop once per chunk, after as many turns as the chunk has set
+# bits. The M6 learns that sequence of 2^14 exits when it repeats, more or less of it
+# depending on where the build puts the loop (495k to 812k cycles for the same
+# instructions). Both inputs' chunks are reshuffled together every sample, which keeps
+# the set bits, and so the instructions, the same.
 function bitarray_ops_setup()
     r = SplitMix(10)
-    return BitVector(isodd.(rand_int(r, 2^20, 0, 1))), BitVector(isodd.(rand_int(r, 2^20, 0, 1)))
+    return BitVector(isodd.(rand_int(r, 2^20, 0, 1))), BitVector(isodd.(rand_int(r, 2^20, 0, 1))), SplitMix(110)
 end
-function bitarray_ops(a, b)
+function bitarray_ops(a, b, _)
     c = a .& .!b
     d = a .⊻ b
     f = findall(c)
     return count(c) + count(d) + length(f), c, d, f
 end
-bench(bitarray_ops, bitarray_ops_setup; ops = 2^20)
+bench(bitarray_ops, bitarray_ops_setup; ops = 2^20, reset = (a, b, r) -> shuffle_det!(r, a.chunks, b.chunks))
 
 # Concatenation of many pieces, including splatting a runtime-length vector
 function cat_splat_setup()
