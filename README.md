@@ -101,13 +101,26 @@ nothing they run changed. Each sets an `instr_tolerance`, from the 95th percenti
 those moves: an instruction change within it is not reported, and does not count as
 explaining a change in cycles. A comparison of two builds takes about 8.5 minutes on the M4 Pro.
 
-**Inference is judged on instructions.** The `inference` category (ported from
-BaseBenchmarks: an `AbstractInterpreter` with its own cache infers whole call graphs,
-Base's included) allocates millions of objects per sample, and its cycles vary 2-11%
+**Inference is judged on instructions.** The `inference` category (after
+BaseBenchmarks: an `AbstractInterpreter` with its own cache infers whole call graphs)
+allocates millions of objects per sample, and its cycles vary 2-11%
 between processes even after a full collection before each sample. Its instruction counts
 stay within 0.5% (0.9% on an AMD EPYC under Linux), and compiler work moved at most 0.2% in instructions across the
 layout-only build pairs, so these benchmarks use `metric = "instructions"` with a 2%
 tolerance.
+
+**Inference works on a program of its own.** With its own cache the interpreter infers
+every callee, so a benchmark that infers `println(::QuoteNode)` infers a thousand methods
+of Base, and moves when any of them changes: over four weeks of master builds, 5 of the 14
+steps in this category came from changes to methods of Base (+18% from one new branch
+in `isidentifier`), not from the compiler. So the category infers
+`data/inference_workload.jl`, a `baremodule` of numbers with promotion, tuples, lists,
+lazy iterators, sorting, printing, a lazy broadcast and a random number generator that
+calls no function of Base, and each benchmark fails at load if inference reaches a method
+outside that module and Core. Across the `isidentifier` change these benchmarks moved at
+most 0.4%; across a week of compiler speedups they retired 5-31% fewer instructions,
+where the ones that inferred Base retired 4-26% fewer. What Base costs to infer is `compiler/infer_base_new_type`
+and the TTFX suite.
 
 **Allocations are reported, not judged.** Every sample records the allocation count and
 bytes. Counts repeat almost exactly between processes and builds, so a change of more
