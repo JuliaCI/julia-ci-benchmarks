@@ -1,9 +1,10 @@
-# Julia-level compilation of fixed call graphs, ported from BaseBenchmarks' "inference"
-# group: abstract interpretation alone, optimization alone, and both. An
-# AbstractInterpreter with its own code cache infers the whole call graph on every
-# sample, Base's callees included, where the compiler category's workloads find Base
-# already inferred. The interpreter API differs between julia versions; the gates below
-# follow BaseBenchmarks, and a break only fails this category.
+# Julia-level compilation of fixed call graphs: abstract interpretation alone,
+# optimization alone, and both, after BaseBenchmarks' "inference" group. An
+# AbstractInterpreter with its own code cache infers the whole call graph on every sample.
+# What it infers is data/inference_workload.jl, a program that calls no function of Base,
+# so that a result moves with the compiler and not with a change to a method of Base that
+# a benchmark happened to reach. The interpreter API differs between julia versions; the
+# gates below follow BaseBenchmarks, and a break only fails this category.
 module InferenceBench
 using ..Driver
 
@@ -89,11 +90,25 @@ end
 optimize!(state) = (CC.optimize(state[][2], OptimizationState(state[]...), state[][1].result); state[][1])
 infer_unoptimized!(state, f, types) = (state[] = infer(f, types; run_optimizer = false); GC.gc(); nothing)
 
-# The targets: real Base and stdlib code, and generated functions that stress one part of
-# the compiler each (from BaseBenchmarks, with the julia PRs that motivated them)
-broadcasting(xs, x) = findall(>(x), abs.(xs))
+# The program to infer
+include(joinpath(Driver.DATA_DIR, "inference_workload.jl"))
+const W = InferenceWorkload
+# What a kernel infers must be the workload's own (closures and exceptions also reach
+# constructors in Core): run on every kernel once, when it is defined
+function check_frozen(kernel)
+    _, interp = kernel()
+    for mi in keys(interp.code_cache.dict)
+        m = mi.def
+        m isa Method && (m.module === W || m.module === Core) ||
+            error("$(nameof(kernel)) infers $mi, which is not part of the workload")
+    end
+    return kernel
+end
+
+# Generated functions that stress one part of the compiler each (from BaseBenchmarks, with
+# the julia PRs that motivated them), on the workload's functions
 # Many locals: sparse state management (julia#45276)
-@eval function many_local_vars(x)
+@eval W function many_local_vars(x)
     $(let ex = Expr(:block), var = gensym()
         push!(ex.args, :($var = x))
         for _ in 1:10000
@@ -105,13 +120,13 @@ broadcasting(xs, x) = findall(>(x), abs.(xs))
     end)
 end
 # Many method matches of the same signature: CachedMethodTable (julia#46535)
-@eval function many_method_matches(x)
+@eval W function many_method_matches(x)
     y = sum(x)
-    $([:(x .= $(Float64(i)); y += sum(x)) for i in 1:100]...)
+    $([:(fill!(x, $(Float64(i))); y += sum(x)) for i in 1:100]...)
     return y
 end
 # Concrete evaluation of a chain of 1000 constant calls
-@eval sins(x) = $(let ex = Expr(:block), var = :x
+@eval W sins(x) = $(let ex = Expr(:block), var = :x
         for _ in 1:1000
             v = gensym()
             push!(ex.args, :($v = sin($var)))
@@ -119,95 +134,86 @@ end
         end
         ex
     end)
-many_const_calls() = sins(42)
-strangesum(::Vector{Float64}) = error("this should not be called")
-strangesum(x::AbstractArray) = sum(x)
-@eval function many_invoke_calls(x)
+@eval W many_const_calls() = sins(42)
+@eval W function many_invoke_calls(x)
     y = sum(x)
-    $([:(y += invoke(strangesum, Tuple{AbstractArray}, x)) for _ in 1:100]...)
+    $([:(y += invoke(strangesum, Tuple{Obj}, x)) for _ in 1:100]...)
     return y
 end
-@eval function many_opaque_closures(x)
+@eval W function many_opaque_closures(x)
     y = sum(x)
-    $([:(oc = Base.Experimental.@opaque (i, x, y) -> (x .= Float64(i); y += sum(x)); oc($i, x, y)) for i in 1:100]...)
+    $([:(oc = Base.Experimental.@opaque (i, x, y) -> (fill!(x, convert(Float64, i)); y += sum(x)); oc($i, x, y)) for i in 1:100]...)
     return y
 end
 # Many entries in the const-prop cache for one method: a callee that can't be concretely
 # evaluated, called with many distinct constants (julia#64707)
-const constprop_sink = Ref(0.0)
-Base.@constprop :aggressive function constprop_target(x::Float64)
-    constprop_sink[] = x
-    return x > 0 ? x : -x
-end
-@eval function many_constprop_entries()
+@eval W function many_constprop_entries()
     y = 0.0
     $([:(y += constprop_target($(Float64(i)))) for i in 1:1000]...)
     return y
 end
 # End of the shared part.
 
-# Abstract interpretation alone (no optimization, so no concrete evaluation either) of
-# real Base and stdlib entry points
-abstract_sin() = infer(sin, (Int,); optimize = false)
-bench(abstract_sin; seconds = 0.25, metric = "instructions", reset = GC.gc)
+# Abstract interpretation alone (no optimization, so no concrete evaluation either) of the
+# workload's kernels: numbers with promotion, printing of values of any type, and a lazy
+# broadcast
+abstract_numeric() = infer(W.numeric_kernel, (Int,); optimize = false)
+bench(check_frozen(abstract_numeric); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
-abstract_println() = infer(println, (QuoteNode,); optimize = false)
-bench(abstract_println; seconds = 0.25, metric = "instructions", reset = GC.gc)
+abstract_show() = infer(W.show_kernel, (W.Buf, W.Quote); optimize = false)
+bench(check_frozen(abstract_show); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
-abstract_broadcasting() = infer(broadcasting, (Vector{Float64}, Float64); optimize = false)
-bench(abstract_broadcasting; seconds = 0.25, metric = "instructions", reset = GC.gc)
+abstract_show_collections() = infer(W.show_collections_kernel, (W.Buf, W.Tree{Tuple{Int,W.Rat{Int}},W.List{W.Cplx{Float64}}}, W.Vec{W.Pair{Symbol,W.Dual{Float64}}}); optimize = false)
+bench(check_frozen(abstract_show_collections); seconds = 0.25, metric = "instructions", reset = GC.gc)
+
+abstract_broadcast() = infer(W.broadcast_kernel, (W.Vec{Float64}, W.Vec{W.Rat{Int}}, Float64); optimize = false)
+bench(check_frozen(abstract_broadcast); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
 # Inference with optimization of every frame, as the compiler runs it
-infer_rand() = infer(rand, (Type{Float64},))
-bench(infer_rand; seconds = 0.25, metric = "instructions", reset = GC.gc)
+infer_rand() = infer(W.rand_kernel, (W.Xoshiro,))
+bench(check_frozen(infer_rand); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
-infer_many_local_vars() = infer(many_local_vars, (Int,))
-bench(infer_many_local_vars; seconds = 0.25, metric = "instructions", reset = GC.gc)
+# Orderings built from functions, whose type depends on a value, in a recursive sort
+infer_sort() = infer(W.sort_kernel, (W.List{Float64}, W.List{W.Pair{Int,W.Rat{Int}}}, Bool))
+bench(check_frozen(infer_sort); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
-infer_many_method_matches() = infer(many_method_matches, (Vector{Float64},))
-bench(infer_many_method_matches; seconds = 0.25, metric = "instructions", reset = GC.gc)
+infer_many_local_vars() = infer(W.many_local_vars, (Int,))
+bench(check_frozen(infer_many_local_vars); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
-infer_many_const_calls() = infer(many_const_calls, ())
-bench(infer_many_const_calls; seconds = 0.25, metric = "instructions", reset = GC.gc)
+infer_many_method_matches() = infer(W.many_method_matches, (W.Vec{Float64},))
+bench(check_frozen(infer_many_method_matches); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
-infer_many_constprop_entries() = infer(many_constprop_entries, ())
-bench(infer_many_constprop_entries; seconds = 0.25, metric = "instructions", reset = GC.gc)
+infer_many_const_calls() = infer(W.many_const_calls, ())
+bench(check_frozen(infer_many_const_calls); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
-infer_many_invoke_calls() = infer(many_invoke_calls, (Vector{Float64},))
-bench(infer_many_invoke_calls; seconds = 0.25, metric = "instructions", reset = GC.gc)
+infer_many_constprop_entries() = infer(W.many_constprop_entries, ())
+bench(check_frozen(infer_many_constprop_entries); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
-infer_many_opaque_closures() = infer(many_opaque_closures, (Vector{Float64},))
-bench(infer_many_opaque_closures; seconds = 0.25, metric = "instructions", reset = GC.gc)
+infer_many_invoke_calls() = infer(W.many_invoke_calls, (W.Vec{Float64},))
+bench(check_frozen(infer_many_invoke_calls); seconds = 0.25, metric = "instructions", reset = GC.gc)
+
+infer_many_opaque_closures() = infer(W.many_opaque_closures, (W.Vec{Float64},))
+bench(check_frozen(infer_many_opaque_closures); seconds = 0.25, metric = "instructions", reset = GC.gc)
 
 # The optimizer alone on one frame, inferred without optimization in the untimed reset
 optimize_many_local_vars_setup() = Ref{Any}()
 optimize_many_local_vars(state) = optimize!(state)
 bench(optimize_many_local_vars, optimize_many_local_vars_setup; seconds = 0.25, metric = "instructions",
-      reset = state -> infer_unoptimized!(state, many_local_vars, (Int,)))
+      reset = state -> infer_unoptimized!(state, W.many_local_vars, (Int,)))
 
 optimize_many_method_matches_setup() = Ref{Any}()
 optimize_many_method_matches(state) = optimize!(state)
 bench(optimize_many_method_matches, optimize_many_method_matches_setup; seconds = 0.25, metric = "instructions",
-      reset = state -> infer_unoptimized!(state, many_method_matches, (Vector{Float64},)))
+      reset = state -> infer_unoptimized!(state, W.many_method_matches, (W.Vec{Float64},)))
 
 optimize_many_invoke_calls_setup() = Ref{Any}()
 optimize_many_invoke_calls(state) = optimize!(state)
 bench(optimize_many_invoke_calls, optimize_many_invoke_calls_setup; seconds = 0.25, metric = "instructions",
-      reset = state -> infer_unoptimized!(state, many_invoke_calls, (Vector{Float64},)))
+      reset = state -> infer_unoptimized!(state, W.many_invoke_calls, (W.Vec{Float64},)))
 
 optimize_many_opaque_closures_setup() = Ref{Any}()
 optimize_many_opaque_closures(state) = optimize!(state)
 bench(optimize_many_opaque_closures, optimize_many_opaque_closures_setup; seconds = 0.25, metric = "instructions",
-      reset = state -> infer_unoptimized!(state, many_opaque_closures, (Vector{Float64},)))
-
-# A keyword call through Core.kwcall into sort!, with a `by` function: the kwsorter, the
-# sort algorithm dispatch tree and the comparators, inferred and optimized
-infer_sort_kwcall() = infer(Core.kwcall, (NamedTuple{(:by, :rev),Tuple{typeof(abs),Bool}}, typeof(sort!), Vector{Float64}))
-bench(infer_sort_kwcall; seconds = 0.25, metric = "instructions", reset = GC.gc)
-
-# show of a Dict of vectors: the printing machinery, IOContext properties and the
-# type-printing paths, abstract interpretation alone
-abstract_show_dict() = infer(show, (IOBuffer, Dict{String,Vector{Int}}); optimize = false)
-bench(abstract_show_dict; seconds = 0.25, metric = "instructions", reset = GC.gc)
+      reset = state -> infer_unoptimized!(state, W.many_opaque_closures, (W.Vec{Float64},)))
 
 end
