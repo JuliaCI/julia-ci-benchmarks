@@ -208,6 +208,27 @@ llvm_large_function_setup() = Ref{Module}()
 llvm_large_function(workload_ref) = Base.invokelatest(latest(workload_ref[], :big), 1.5, 2.5, 150)
 bench(llvm_large_function, llvm_large_function_setup; reset = workload_ref -> (workload_ref[] = load(BIG_SRC)), seconds = 1.0)
 
+# 8x8 matrix products on tuples, fully unrolled into one basic block of thousands of
+# instructions. Some of LLVM's work on a block (the SLP vectorizer's above all) grows
+# faster than the block, which the large function above is too small to show.
+function unrolled_block_src(n)
+    entry(i, j) = join(("A[$(i + n * (k - 1))] * B[$(k + n * (j - 1))]" for k in 1:n), " + ")
+    entries = join((entry(i, j) for j in 1:n for i in 1:n), ",\n    ")
+    return """
+    @inline mm(A::NTuple{$(n * n),Float64}, B::NTuple{$(n * n),Float64}) = (
+        $entries,)
+    mat3(A, B) = map(+, mm(mm(A, B), A), mm(B, A))
+    """
+end
+const UNROLLED_SRC = unrolled_block_src(8)
+function llvm_unrolled_block_setup()
+    r = SplitMix(385)
+    return Tuple(rand_f64(r, 64, -1, 1)), Tuple(rand_f64(r, 64, -1, 1)), Ref{Module}()
+end
+llvm_unrolled_block(A, B, workload_ref) = Base.invokelatest(latest(workload_ref[], :mat3), A, B)
+bench(llvm_unrolled_block, llvm_unrolled_block_setup;
+      reset = (A, B, workload_ref) -> (workload_ref[] = load(UNROLLED_SRC)), seconds = 2.0)
+
 # Inserting a method that 400 compiled callers depend on: method table insertion,
 # backedge traversal and invalidation
 const INVALIDATE_SRC = """
