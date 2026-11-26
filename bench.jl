@@ -126,7 +126,10 @@ function main(args)
                    --category=$cat --out=$lines_path --seconds-scale=$(o["seconds-scale"])
                    --tag=arm=$name --tag=block=$block --tag=order=$order`
             isempty(o["filter"]) || (cmd = `$cmd --filter=$(o["filter"])`)
-            cmd = addenv(cmd, "JULIA_LOAD_PATH" => "@stdlib", "JULIA_PROJECT" => nothing)
+            # With the JIT object cache, a compile can load object code from an earlier sample,
+            # process or arm instead of running LLVM
+            cmd = addenv(cmd, "JULIA_LOAD_PATH" => "@stdlib", "JULIA_PROJECT" => nothing,
+                         "JULIA_OBJCACHE" => "0")
             logfile = joinpath(logdir, "$cat-$name-$block.log")
             ok, msg = open(log -> run_process(cmd, log, o["timeout"]), logfile, "w")
             print(stderr, read(logfile, String))
