@@ -3,7 +3,7 @@
 A runtime benchmark suite for Julia itself, small enough to run on every commit to
 `master` and on pull requests, on the same macOS aarch64 machine as the TTFX job. It
 complements [BaseBenchmarks.jl](https://github.com/JuliaCI/BaseBenchmarks.jl): instead of
-thousands of overlapping cases, it has 213 benchmarks, each chosen to cover a code path
+thousands of overlapping cases, it has 214 benchmarks, each chosen to cover a code path
 the others do not. The suite targets what changes when *Julia* changes: codegen and
 aliasing information, LLVM upgrades, inference, lowering, the runtime, the GC and the
 scheduler. Library performance (LinearAlgebra, SparseArrays, ...) is out of scope.
@@ -136,7 +136,7 @@ per-sample reset with a fixed evaluation count, and a record format the comparis
 | `types` | subtyping, intersection, apply_type with the type cache, method lookup, type printing, promote_type and typejoin, promote_op | cycles |
 | `runtime` | throw/catch, try without throw, backtrace lookup, logging, egal and hash, deepcopy, global and module bindings, task-local storage, `ccall` with `Ref` and `Cstring`, atomic fields, uncontended locks, ScopedValues, the calling convention for large structs and recursion, allocation elimination, tasks spawned and waited for on one thread | cycles |
 | `gc` | binary trees, full GC of a large heap, the write barrier over many old owners and on an old array, big arrays, small arrays, finalizers, BigInt, young collections with many live cancellation sources | time |
-| `compiler` | parsing (a file, many short expressions), macro expansion, lowering (whole file, closures and keywords, a large function), method and type definitions, the top-level interpreter, inference of a workload and of Base for a new type, first call, LLVM on a large function, method invalidation | cycles |
+| `compiler` | parsing (a file, many short expressions), macro expansion, lowering (whole file, closures and keywords, a large function), method and type definitions, the top-level interpreter, inference of a workload and of Base for a new type, first call, LLVM on a large function and on one huge unrolled block, method invalidation; `bench.jl` turns off the JIT object cache (`JULIA_OBJCACHE=0`) so that every compile runs LLVM | cycles |
 | `apps` | n-body, Mandelbrot, spectral norm, fannkuch, a JSON parser, a bytecode interpreter, LU with bounds checks, RK4 on tuples, BFS, spell checking, root finding with closures, dual-number AD, a Go engine, a 2-D seismic FDTD, actor centrality over a graph of mutable nodes, fully unrolled straight-line kernels (a generated ODE right-hand side, Keccak-f[1600], 16x16 tuple matrix products) | cycles |
 | `parallel` (4 threads) | spawn/fetch, nested spawn, static `@threads`, rebalancing an imbalanced loop (`:greedy`), channels (ping-pong, buffered), lock and atomic contention, task switches, threaded allocation, parallel marking of a broad forest | time |
 
